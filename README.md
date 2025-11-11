@@ -45,6 +45,12 @@
 
 ---
 
+## 🎞️ Demo Video
+
+![image](https://github.com/user-attachments/assets/1bc6cb14-ae4f-4a40-9c33-e35eb87c68f3)
+
+---
+
 ## 📂 โครงสร้างไฟล์
 
 ```
