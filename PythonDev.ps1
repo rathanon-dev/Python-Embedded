@@ -1,25 +1,12 @@
-# PythonDev class: corrected to avoid default params in class methods
-Class PythonDev {
+class Main {
+    <# Define the class. Try constructors, properties, or methods. #>
     [hashtable] $Config
-    [hashtable] $Cache 
+    [hashtable] $Cache
     [string]    $RootDir
-    [string]    $IndexUrl = "https://api.nuget.org/v3-flatcontainer/python/index.json"
-
-    [string] $EmbeddedPath = $null
-    [string] $EmbeddedVersion = $null
-    [bool]   $EmbeddedPipInstalled = $false
-    [string] $EmbeddedPipVersion = $null
-
-    [bool]   $GlobalExists = $false
-    [string] $GlobalPath = $null
-    [string] $GlobalVersion = $null
-    [bool]   $GlobalPipInstalled = $false
-    [string] $GlobalPipVersion = $null
-    [datetime] $TestLastChecked  
-    [string] $Report
-
+    [string]    $Report
+  
     # Constructor: custom root (no auto-create)
-    PythonDev([string] $rootDir) {
+    Main([string] $rootDir) {
         # resolve relative -> absolute
         if (-not [System.IO.Path]::IsPathRooted($rootDir)) {
             $resolved = Join-Path (Get-Location).Path $rootDir
@@ -41,7 +28,7 @@ Class PythonDev {
     }
 
     # Default constructor: resolve PSScriptRoot or current location
-    PythonDev() {
+    Main() {
         $root = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
         $root = [System.IO.Path]::GetFullPath($root)
         Write-Host "Path Default : $root" -ForegroundColor Green
@@ -51,56 +38,71 @@ Class PythonDev {
     # SetPath: validate and assign config (does NOT create folders)
     [void] SetPath([string] $rootDir) {
         try {
-            if (-not $rootDir -or [string]::IsNullOrWhiteSpace($rootDir)) {
-                throw [System.ArgumentException]::new("rootDir is null, empty or whitespace.")
-            }
-
+            if (-not $rootDir -or [string]::IsNullOrWhiteSpace($rootDir)) { throw [System.ArgumentException]::new("rootDir is null, empty or whitespace.") }
             # normalize to full absolute path
             $absRoot = [System.IO.Path]::GetFullPath($rootDir)
 
             # build newConfig based on absolute root
             $newConfig = @{
-                RootDir  = $absRoot
+                RootDir  = $absRoot 
                 DLDir    = Join-Path $absRoot "download"
                 PyDir    = Join-Path $absRoot "python_embeded"
                 CudaBin  = Join-Path $absRoot "driver\CUDA"
                 CuDNNBin = Join-Path $absRoot "driver\CUDNN"
                 PGit     = Join-Path $absRoot "driver\PortableGit"
+                FFmpeg   = Join-Path $absRoot "driver\ffmpeg"
             }
 
             # assign properties only after computed successfully
             $this.RootDir = $absRoot
             $this.Config = $newConfig
-            if (-not $this.Cache) {
-                $this.Cache = @{} 
-            }
+            if (-not $this.Cache) { $this.Cache = @{} }
             Write-Host "PythonManager initialized (root: $($this.RootDir))" -ForegroundColor DarkGray
 
-            if (-not (Test-Path -Path $absRoot)) {
-                Write-Warning "RootDir set to '$absRoot' but the directory does not exist. Call CreateFolders('Skip'| 'Backup' | 'Recreate') to create as needed."
-            }
-            else {
-                Write-Host "Config set for RootDir: $absRoot" -ForegroundColor DarkGray
-            }
+            if (-not (Test-Path -Path $absRoot)) { Write-Warning "RootDir set to '$absRoot' but the directory does not exist. Call CreateFolders('Skip'| 'Backup' | 'Recreate') to create as needed." }
+            else { Write-Host "Config set for RootDir: $absRoot" -ForegroundColor DarkGray }
         }
-        catch {
-            Write-Warning "SetPath() failed: $($_.Exception.GetType().Name) - $($_.Exception.Message)"
-        }
+        catch { Write-Warning "SetPath() failed: $($_.Exception.GetType().Name) - $($_.Exception.Message)" }
     }
-
-    # Overloads for CreateFolders
-    # 0-arg: default to Skip + perform (create real)
-    
-
-    # Helper: return first non-empty property from provided names
-    [string] GetFirstNonNull([string[]] $names) {
+    # Helper: return first non-empty property/value from provided names
+    # - ถ้าไม่ส่ง $Target จะใช้ $this ตามเดิม
+    # - รองรับทั้ง PSObject และ hashtable
+    [string] GetFirstNonNull([string[]] $names, [object] $Target = $null) {
         try {
+            if (-not $Target) { $Target = $this }
+            if (-not $Target) { return $null }
+
             foreach ($n in $names) {
-                if ($this -and $this.PSObject.Properties.Match($n).Count -gt 0) {
-                    $val = $this.$n
-                    if ($val) { return [string]$val }
+                if (-not $n) { continue }
+
+                $val = $null
+
+                # กรณีเป็น hashtable
+                if ($Target -is [hashtable]) {
+                    if ($Target.ContainsKey($n)) {
+                        $val = $Target[$n]
+                    }
+                }
+                else {
+                    # กรณีเป็น object ปกติ (PSCustomObject / class)
+                    if ($Target.PSObject.Properties.Match($n).Count -gt 0) {
+                        $val = $Target.$n
+                    }
+                }
+
+                if ($null -ne $val) {
+                    # ถ้าเป็น string ว่างหรือ whitespace ให้ถือว่า "ไม่มีค่า"
+                    if ($val -is [string]) {
+                        if (-not [string]::IsNullOrWhiteSpace($val)) {
+                            return [string]$val
+                        }
+                    }
+                    else {
+                        return [string]$val
+                    }
                 }
             }
+
             return $null
         }
         catch {
@@ -108,99 +110,112 @@ Class PythonDev {
         }
     }
 
-    # Helper: determine cache/download base dir (uses Config.DLDir -> DLDir -> AbsRoot\cache)
+    # Helper: determine download/cache base dir
+    # Priority:
+    #   1) this.Config.DLDir (ทั้งแบบ hashtable และ object)
+    #   2) RootDir\Download  หรือ AbsRoot\Download
+    #   3) (Get-Location)\Download
+    #
+    # และถ้า DLDir ยังไม่ถูกตั้งใน Config จะตั้งให้ด้วย
     [string] GetCacheBase() {
         try {
-            if ($this -and $this.PSObject.Properties.Match('Config').Count -gt 0 -and $this.Config -and $this.Config.PSObject.Properties.Match('DLDir').Count -gt 0 -and $this.Config.DLDir) {
-                return [string]$this.Config.DLDir
+            $dlDir = $null
+
+            # มี this.Config ไหม
+            if ($this -and $this.PSObject.Properties.Match('Config').Count -gt 0 -and $this.Config) {
+
+                # กรณี Config เป็น hashtable
+                if ($this.Config -is [hashtable]) {
+                    if ($this.Config.ContainsKey('DLDir') -and $this.Config['DLDir']) {
+                        $dlDir = [string]$this.Config['DLDir']
+                    }
+                }
+                else {
+                    # กรณี Config เป็น object/pscustomobject
+                    if ($this.Config.PSObject.Properties.Match('DLDir').Count -gt 0 -and $this.Config.DLDir) {
+                        $dlDir = [string]$this.Config.DLDir
+                    }
+                }
             }
-            $v = $this.GetFirstNonNull(@('DLDir', 'CacheDir', 'Cache'))
-            if ($v) { return $v }
-            if ($this -and $this.PSObject.Properties.Match('AbsRoot').Count -gt 0 -and $this.AbsRoot) {
-                return (Join-Path $this.AbsRoot 'cache')
+
+            # ถ้ายังไม่มี DLDir -> สร้างจาก RootDir/AbsRoot
+            if (-not $dlDir) {
+                $root = $null
+
+                if ($this -and $this.PSObject.Properties.Match('RootDir').Count -gt 0 -and $this.RootDir) {
+                    $root = $this.RootDir
+                }
+                elseif ($this -and $this.PSObject.Properties.Match('AbsRoot').Count -gt 0 -and $this.AbsRoot) {
+                    $root = $this.AbsRoot
+                }
+                else {
+                    $root = (Get-Location).Path
+                }
+
+                $dlDir = Join-Path $root 'Download'
+
+                # ตั้งกลับเข้า Config ด้วย (ถ้าเขียนได้)
+                if ($this -and $this.PSObject.Properties.Match('Config').Count -gt 0 -and $this.Config) {
+                    if ($this.Config -is [hashtable]) {
+                        $this.Config['DLDir'] = $dlDir
+                    }
+                    else {
+                        if ($this.Config.PSObject.Properties.Match('DLDir').Count -gt 0) {
+                            $this.Config.DLDir = $dlDir
+                        }
+                    }
+                }
             }
-            return (Join-Path (Get-Location).Path 'cache')
+
+            return [string]$dlDir
         }
         catch {
-            return (Join-Path (Get-Location).Path 'cache')
+            # fallback สุดท้าย: โฟลเดอร์ Download ใต้ cwd
+            return (Join-Path (Get-Location).Path 'Download')
         }
     }
+ 
 
     [void] CreateFolders() {
         $this.CreateFolders('Skip', $false)
     }
 
     # 1-arg: Mode only -> perform (WhatIf = $false)
-    [void] CreateFolders([string] $Mode) {
-        $this.CreateFolders($Mode, $false)
-    }
+    [void] CreateFolders([string] $Mode) { $this.CreateFolders($Mode, $false) }
 
     # 2-arg: Mode + WhatIf -> actual implementation
     [void] CreateFolders([string] $Mode, [bool] $WhatIf) {
-        if (-not $this.Config) {
-            Write-Warning "Config is null — call SetPath() first."
-            return
-        }
-
+        if (-not $this.Config) { Write-Warning "Config is null — call SetPath() first."; return }
         # validate Mode inside method
         $allowed = @('Skip', 'Recreate', 'Backup')
-        if (-not ($allowed -contains $Mode)) {
-            Write-Warning "Invalid Mode '$Mode'. Allowed values: $($allowed -join ', '). Defaulting to 'Skip'."
-            $Mode = 'Skip'
-        }
-
+        if (-not ($allowed -contains $Mode)) { Write-Warning "Invalid Mode '$Mode'. Allowed values: $($allowed -join ', '). Defaulting to 'Skip'."; $Mode = 'Skip' }
         foreach ($key in $this.Config.Keys) {
             $path = $this.Config[$key]
-            if (-not $path) {
-                Write-Warning "Empty path for '$key' — skipping."
-                continue
-            }
-
+            if (-not $path) { Write-Warning "Empty path for '$key' — skipping."; continue }
             $exists = Test-Path -Path $path
-
             if ($exists) {
                 switch ($Mode) {
                     'Skip' {
-                        if ($WhatIf) {
-                            Write-Host "[WhatIf] Would skip existing: $key => $path" -ForegroundColor Cyan
-                        }
-                        else {
-                            Write-Host "Exists : $key => $path (skipped)" -ForegroundColor Yellow
-                        }
+                        if ($WhatIf) { Write-Host "[WhatIf] Would skip existing: $key => $path" -ForegroundColor Cyan }
+                        else { Write-Host "Exists : $key => $path (skipped)" -ForegroundColor Yellow }
                         continue
                     }
                     'Backup' {
                         $ts = (Get-Date).ToString('yyyyMMddHHmmss')
                         $backupPath = "$path.bak_$ts"
 
-                        if ($WhatIf) {
-                            Write-Host "[WhatIf] Would move (backup): $path -> $backupPath" -ForegroundColor Cyan
-                        }
+                        if ($WhatIf) { Write-Host "[WhatIf] Would move (backup): $path -> $backupPath" -ForegroundColor Cyan }
                         else {
-                            try {
-                                Move-Item -Path $path -Destination $backupPath -Force -ErrorAction Stop
-                                Write-Host "Backed-up: $key => $backupPath" -ForegroundColor Yellow
-                            }
-                            catch {
-                                Write-Warning "Backup failed for $key => $path : $($_.Exception.Message)"
-                                continue
-                            }
+                            try { Move-Item -Path $path -Destination $backupPath -Force -ErrorAction Stop ; Write-Host "Backed-up: $key => $backupPath" -ForegroundColor Yellow }
+                            catch { Write-Warning "Backup failed for $key => $path : $($_.Exception.Message)"; continue }
                         }
                         # after backup, fall through to creation
                     }
                     'Recreate' {
-                        if ($WhatIf) {
-                            Write-Host "[WhatIf] Would remove: $path" -ForegroundColor Cyan
-                        }
+                        if ($WhatIf) { Write-Host "[WhatIf] Would remove: $path" -ForegroundColor Cyan }
                         else {
-                            try {
-                                Remove-Item -Path $path -Recurse -Force -ErrorAction Stop
-                                Write-Host "Removed: $key => $path" -ForegroundColor Magenta
-                            }
-                            catch {
-                                Write-Warning "Remove failed for $key => $path : $($_.Exception.Message)"
-                                continue
-                            }
+                            try { Remove-Item -Path $path -Recurse -Force -ErrorAction Stop ; Write-Host "Removed: $key => $path" -ForegroundColor Magenta }
+                            catch { Write-Warning "Remove failed for $key => $path : $($_.Exception.Message)" ; continue }
                         }
                         # after remove, fall through to creation
                     }
@@ -208,104 +223,46 @@ Class PythonDev {
             }
 
             # Now path does not exist (or was removed/backed up) -> create or WhatIf
-            if ($WhatIf) {
-                Write-Host "[WhatIf] Would create: $key => $path" -ForegroundColor Cyan
-            }
+            if ($WhatIf) { Write-Host "[WhatIf] Would create: $key => $path" -ForegroundColor Cyan }
             else {
-                try {
-                    New-Item -Path $path -ItemType Directory -Force -ErrorAction Stop | Out-Null
-                    Write-Host "Created: $key => $path" -ForegroundColor Green
-                }
+                try { New-Item -Path $path -ItemType Directory -Force -ErrorAction Stop | Out-Null; Write-Host "Created: $key => $path" -ForegroundColor Green }
                 catch {
-                    try {
-                        [System.IO.Directory]::CreateDirectory($path) | Out-Null
-                        Write-Host "Created (dotnet): $key => $path" -ForegroundColor Green
-                    }
-                    catch {
-                        Write-Warning "Failed to create: $key => $path : $($_.Exception.Message)"
-                    }
+                    try { [System.IO.Directory]::CreateDirectory($path) | Out-Null; Write-Host "Created (dotnet): $key => $path" -ForegroundColor Green }
+                    catch { Write-Warning "Failed to create: $key => $path : $($_.Exception.Message)" }
                 }
             }
         } # end foreach
     }
 
     # Overloads for RemoveFolder
-    [void] RemoveFolder([string] $key) {
-        $this.RemoveFolder($key, $false)
-    }
-
+    [void] RemoveFolder([string] $key) { $this.RemoveFolder($key, $false) }
     [void] RemoveFolder([string] $key, [bool] $WhatIf) {
         if (-not $this.Config) { Write-Warning "Config is null — call SetPath() first."; return }
-        if (-not $this.Config.ContainsKey($key)) { Write-Warning "Unknown key: $key"; return }
-
-        $path = $this.Config[$key]
-        if (-not (Test-Path -Path $path)) {
-            Write-Host "Not exists: $key => $path" -ForegroundColor Yellow
-            return
-        }
-
-        if ($WhatIf) {
-            Write-Host "[WhatIf] Would remove: $key => $path" -ForegroundColor Cyan
-            return
-        }
-
-        try {
-            Remove-Item -Path $path -Recurse -Force -ErrorAction Stop
-            Write-Host "Removed: $key => $path" -ForegroundColor Magenta
-        }
-        catch {
-            Write-Warning "Failed to remove $key => $path : $($_.Exception.Message)"
-        }
+        if (-not $this.Config.ContainsKey($key)) { Write-Warning "Unknown key: $key"; return }  $path = $this.Config[$key]; if (-not (Test-Path -Path $path)) { Write-Host "Not exists: $key => $path" -ForegroundColor Yellow ; return }
+        if ($WhatIf) { Write-Host "[WhatIf] Would remove: $key => $path" -ForegroundColor Cyan ; return }
+        try { Remove-Item -Path $path -Recurse -Force -ErrorAction Stop ; Write-Host "Removed: $key => $path" -ForegroundColor Magenta ; }
+        catch { Write-Warning "Failed to remove $key => $path : $($_.Exception.Message)" ; }
     }
 
-    [bool] IsFolder() {
-        if (-not $this.Config) {
-            Write-Warning "Config is null or empty. Call SetPath() first."
-            return $false
-        }
+    [bool] IsFolder() { if (-not $this.Config) { Write-Warning "Config is null or empty. Call SetPath() first." ; return $false; }  $allOk = $true ; foreach ($key in $this.Config.Keys) { $path = $this.Config[$key]; if (-not (Test-Path -Path $path)) { Write-Warning "Missing: $key => $path " ; $allOk = $false } else { Write-Host "OK: $key => $path" -ForegroundColor Green } } return $allOk }
 
-        $allOk = $true
 
-        foreach ($key in $this.Config.Keys) {
-            $path = $this.Config[$key]
-            if (-not (Test-Path -Path $path)) {
-                Write-Warning "Missing: $key => $path"
-                $allOk = $false
-            }
-            else {
-                Write-Host "OK: $key => $path" -ForegroundColor Green
-            }
-        }
-
-        return $allOk
-    }
-
- 
     # --- NormalizeVersion: return numeric portion only, or $null if not numeric-stable ---
     [string] NormalizeVersion([string] $v) {
         if (-not $v) { return $null }
-        $s = $v.Trim()
-
-        # strip common prefix
-        $s = $s -replace '^[Pp]ython[-_]*', ''
-        $s = $s -replace '[\s_]', '.'
-
+        $s = $v.Trim();        # strip common prefix
+        $s = $s -replace '^[Pp]ython[-_]*', '' ;
+        $s = $s -replace '[\s_]', '.';
         # We only accept pure-numeric stable forms like "3.5.3" or "3.14.0" (no letters, no '-' suffix)
-        if ($s -notmatch '^[0-9]+(\.[0-9]+){1,3}$') {
-            return $null
-        }
-
+        if ($s -notmatch '^[0-9]+(\.[0-9]+){1,3}$') { return $null }
         # normalize to up to 3 components (major.minor.build)
         $parts = $s.Split('.') | Where-Object { $_ -ne '' }
         if ($parts.Count -eq 1) { $s = "$($parts[0]).0.0" }
         elseif ($parts.Count -eq 2) { $s = "$($parts[0]).$($parts[1]).0" }
         else { $s = "$($parts[0]).$($parts[1]).$($parts[2])" }
-
         try { return ([version]$s).ToString() } catch { return $null }
     }
-    [Object]GetPythonVersions() {
-        return $this.GetPythonVersions($false, $false)
-    }
+
     # -------------------------
     # GetPythonVersions
     # Params:
@@ -314,10 +271,12 @@ Class PythonDev {
     # Returns: PSCustomObject[] unless $AsJson - each object contains:
     #   Version (string), VersionObj ([version]), Raw (string), MajorMinor (string), IsStable (bool)
     # -------------------------
+    [Object]GetPythonVersions() { return $this.GetPythonVersions($false, $false) }
     [Object] GetPythonVersions([bool] $ForceRefresh = $false, [bool] $AsJson = $false) {
         # fallback if fetch fails
         $fallback = @('3.12.0', '3.11.11', '3.10.13', '3.9.18', '3.8.18')
 
+        $IndexUrl = "https://api.nuget.org/v3-flatcontainer/python/index.json"
         if (-not $this.Cache) {
             $this.Cache = @{} 
         }
@@ -328,7 +287,7 @@ Class PythonDev {
         }
 
         try {
-            $index = Invoke-RestMethod -Uri $this.IndexUrl -TimeoutSec 20 -ErrorAction Stop
+            $index = Invoke-RestMethod -Uri $IndexUrl -TimeoutSec 20 -ErrorAction Stop
         }
         catch {
             Write-Warning "Fetch failed: $($_.Exception.Message)"
@@ -393,21 +352,15 @@ Class PythonDev {
         $this.Cache['versions'] = $sorted
         return ($AsJson) ? ($sorted | ConvertTo-Json -Depth 3) : $sorted
     }
-    # ตัวเลือก: เมทอด menu ที่สามารถเลือก auto-install mode (ไม่ควรเป็น default)
-    [string] ShowPythonVersionsMenu([bool] $Interactive = $true, [bool] $AutoInstall = $false) {
-        # your existing menu implementation but return selected version
-        # if $AutoInstall -and $selected - then you may call $this.CheckPython + $this.DownloadAndCopyPython here
-        # BUT better approach: return selected version and let caller (InstallFlow) handle the rest.
-        $list = $this.GetPythonVersions()
-        return  $list[1 - 1].Version
-    }
-    # Small helper: Show as simple numeric menu (returns selected Version string or $null)
+     
+    # your existing menu implementation but return selected version
+    # if $AutoInstall -and $selected - then you may call $this.CheckPython + $this.DownloadAndCopyPython here
+    # BUT better approach: return selected version and let caller (InstallFlow) handle the rest.
+    [string] ShowPythonVersionsMenu([bool] $Interactive = $true, [bool] $AutoInstall = $false) { $list = $this.GetPythonVersions(); return  $list[1 - 1].Version }
     [string] ShowPythonVersionsMenu() {
         $list = $this.GetPythonVersions()
         if (-not $list -or $list.Count -eq 0) { Write-Warning "No versions to show"; return $null }
-        for ($i = 0; $i -lt $list.Count; $i++) {
-            Write-Host ("[{0}] {1}" -f ($i + 1), $list[$i].Version)
-        }
+        for ($i = 0; $i -lt $list.Count; $i++) { Write-Host ("[{0}] {1}" -f ($i + 1), $list[$i].Version) }
         $sel = Read-Host "Select number (q to cancel)"
         if ($sel -match '^[Qq]') { return $null }
         if (-not ($sel -as [int])) { Write-Warning "Invalid selection"; return $null }
@@ -424,8 +377,6 @@ Class PythonDev {
     # - This method is interactive by default; you can pass $autoReplace,$backup,$whatIf via overload later
     # -------------------------
     [bool] CheckPython([string] $version) { return $this.CheckPython($version, $false, $true, $false) }
-
-    
     [bool] CheckPython([string] $version, [bool] $autoRemove, [bool] $backupBeforeRemove, [bool] $whatIf) {
         if (-not $this.Config) { Write-Warning "Config not initialized"; return $false }
         $pyDir = $this.Config.PyDir
@@ -442,7 +393,7 @@ Class PythonDev {
         $instVer = ($installed -match '\d+(\.\d+){1,2}') ? $matches[0] : $null
         $targetNorm = $this.NormalizeVersion($version)
 
-        $shouldReplace = $false
+        $shouldReplace = $null
         if ($instVer -and $targetNorm -and ([version]$instVer -eq [version]$targetNorm)) {
             if (-not $autoRemove) {
                 $r = Read-Host "Installed matches $targetNorm. Replace? (Y/N)"
@@ -479,194 +430,119 @@ Class PythonDev {
         }
     }
 
+    
     # --- DownloadAndCopyPython overloads ---
-    [bool] DownloadAndCopyPython([string] $version) { return $this.DownloadAndCopyPython($version, $false, $false, $true) }
-    [bool] DownloadAndCopyPython([string] $version, [bool] $WhatIf) { return $this.DownloadAndCopyPython($version, $WhatIf, $false, $true) }
-    # Replace existing DownloadAndCopyPython implementation with this
-    [bool] DownloadAndCopyPython([string] $version, [bool] $WhatIf, [bool] $ForceOverwrite, [bool] $BackupExisting) {
+    [bool] DownloadAndCopyPython([string] $v) { return $this.DownloadAndCopyPython($v, $false, $false, $true) }
+    [bool] DownloadAndCopyPython([string] $v, [bool] $W) { return $this.DownloadAndCopyPython($v, $W, $false, $true) }
+    [bool] DownloadAndCopyPython([string] $v, [bool]$W, [bool]$Force, [bool]$Backup) {
+
         if (-not $this.Config) { Write-Warning "Config not initialized"; return $false }
 
         $dl = $this.Config.DLDir
         $target = $this.Config.PyDir
 
-        # Ensure download dir exists (or show whatif)
-        if (-not (Test-Path -Path $dl)) {
-            if ($WhatIf) { Write-Host "[WhatIf] Would create download directory: $dl" -ForegroundColor Cyan }
-            else { New-Item -Path $dl -ItemType Directory -Force | Out-Null; Write-Host "Created DLDir: $dl" -ForegroundColor Green }
+        if (-not (Test-Path $dl)) {
+            if ($W) { Write-Host "[WhatIf] mkdir $dl" -Foreground Cyan }
+            else { New-Item $dl -ItemType Directory -Force | Out-Null }
         }
 
-        $vNorm = $this.NormalizeVersion($version)
-        if (-not $vNorm) { Write-Warning "Cannot normalize version: $version"; return $false }
+        $vNorm = $this.NormalizeVersion($v)
+        if (-not $vNorm) { Write-Warning "Cannot normalize version: $v"; return $false }
 
-        $nupkgName = "python.$version.nupkg"
-        $url = "https://api.nuget.org/v3-flatcontainer/python/$version/$nupkgName"
-        $nupkgLocal = Join-Path $dl $nupkgName
-        $extractTmp = Join-Path $env:TEMP ("py_extract_{0}" -f ([Guid]::NewGuid().ToString()))
+        $nupkg = "python.$v.nupkg"
+        $url = "https://api.nuget.org/v3-flatcontainer/python/$v/$nupkg"
+        $localFile = Join-Path $dl $nupkg
+        $tmp = Join-Path $env:TEMP ("py_extract_{0}" -f ([guid]::NewGuid()))
 
-        # Download
+        # --- Download ---
         try {
-            if ($WhatIf) {
-                Write-Host "[WhatIf] Would download: $url -> $nupkgLocal" -ForegroundColor Cyan
-            }
-            else {
-                Write-Host "Downloading $url ..." -ForegroundColor Cyan
-                Invoke-WebRequest -Uri $url -OutFile $nupkgLocal -TimeoutSec 300 -ErrorAction Stop
-                Write-Host "Downloaded: $nupkgLocal" -ForegroundColor Green
-            }
+            if ($W) { Write-Host "[WhatIf] download $url -> $localFile" -Foreground Cyan }
+            else { Invoke-WebRequest $url -OutFile $localFile -TimeoutSec 300 -ErrorAction Stop }
         }
-        catch {
-            Write-Warning "Download failed: $($_.Exception.Message)"; return $false
-        }
+        catch { Write-Warning "Download failed: $($_.Exception.Message)"; return $false }
 
-        if (-not $WhatIf -and -not (Test-Path -Path $nupkgLocal)) {
-            Write-Warning "Downloaded package not found: $nupkgLocal"; return $false
-        }
+        if (-not $W -and -not (Test-Path $localFile)) { Write-Warning "Missing file: $localFile"; return $false }
 
-        # Extract nupkg
-        if ($WhatIf) {
-            Write-Host "[WhatIf] Would extract $nupkgLocal -> $extractTmp" -ForegroundColor Cyan
-        }
+        # --- Extract ---
+        if ($W) { Write-Host "[WhatIf] extract $localFile -> $tmp" -Foreground Cyan }
         else {
-            try {
-                New-Item -Path $extractTmp -ItemType Directory -Force | Out-Null
-                Expand-Archive -Path $nupkgLocal -DestinationPath $extractTmp -Force
-                Write-Host "Extracted to $extractTmp" -ForegroundColor DarkGray
-            }
-            catch {
-                Write-Warning "Extract failed: $($_.Exception.Message)"
-                if (Test-Path $extractTmp) { Remove-Item -Path $extractTmp -Recurse -Force -ErrorAction SilentlyContinue }
-                return $false
-            }
+            try { New-Item $tmp -ItemType Directory -Force | Out-Null; Expand-Archive $localFile $tmp -Force }
+            catch { Write-Warning "Extract failed: $($_.Exception.Message)"; Remove-Item $tmp -Recurse -Force; return $false }
         }
 
-        # locate 'tools' folder inside extracted nupkg (common paths)
-        $candidatePaths = @(
-            (Join-Path $extractTmp 'tools'),
-            (Join-Path $extractTmp 'content\tools'),
-            (Join-Path $extractTmp 'package\tools'),
-            (Join-Path $extractTmp 'package\content\tools'),
-            (Join-Path $extractTmp 'content'),
-            $extractTmp
+        # --- Locate tools folder ---
+        $paths = @(
+            "$tmp/tools",
+            "$tmp/content/tools",
+            "$tmp/package/tools",
+            "$tmp/package/content/tools",
+            "$tmp/content",
+            $tmp
         )
 
-        $sourceTools = $null
-        foreach ($p in $candidatePaths) {
-            if (Test-Path -Path $p) {
-                # prefer a path that actually contains python.exe or DLLs
-                $hasPython = Test-Path -Path (Join-Path $p 'python.exe')
-                if ($hasPython) { $sourceTools = $p; break }
-                # otherwise first existing candidate is acceptable
-                if (-not $sourceTools) { $sourceTools = $p }
-            }
+        $src = $paths | Where-Object { Test-Path $_ } | Where-Object {
+            Test-Path (Join-Path $_ 'python.exe')
+        } | Select-Object -First 1
+
+        if (-not $src) {
+            $src = $paths | Where-Object { Test-Path $_ } | Select-Object -First 1
         }
 
-        if (-not $sourceTools) {
-            Write-Warning "Cannot find tools/content folder inside package. Extracted structure may differ."
-            if (-not $WhatIf) { Remove-Item -Path $extractTmp -Recurse -Force -ErrorAction SilentlyContinue }
-            return $false
+        if (-not $src) {
+            Write-Warning "Cannot locate tools folder"; Remove-Item $tmp -Recurse -Force; return $false
         }
 
-        Write-Host "Using source folder: $sourceTools" -ForegroundColor DarkGray
-
-        # Prepare target: if exists handle according to flags
-        if (Test-Path -Path $target) {
-            if ($WhatIf) {
-                if ($BackupExisting) {
-                    Write-Host "[WhatIf] Would backup existing $target -> $target.bak_TIMESTAMP" -ForegroundColor Cyan
-                }
-                elseif ($ForceOverwrite) {
-                    Write-Host "[WhatIf] Would remove existing $target" -ForegroundColor Cyan
-                }
-                else {
-                    Write-Host "[WhatIf] Target exists: $target (would prompt or abort)" -ForegroundColor Cyan
-                }
+        # --- Prepare target ---
+        if (Test-Path $target) {
+            if ($W) {
+                if ($Backup) { Write-Host "[WhatIf] backup $target" -Foreground Cyan }
+                elseif ($Force) { Write-Host "[WhatIf] remove $target" -Foreground Cyan }
+                else { Write-Host "[WhatIf] prompt overwrite" -Foreground Cyan }
             }
             else {
-                if ($BackupExisting) {
-                    $ts = (Get-Date).ToString('yyyyMMddHHmmss')
-                    $backup = "$target.bak_$ts"
-                    try {
-                        Move-Item -Path $target -Destination $backup -Force -ErrorAction Stop
-                        Write-Host "Backed up $target -> $backup" -ForegroundColor Yellow
-                    }
-                    catch {
-                        Write-Warning "Backup failed: $($_.Exception.Message)"
-                        Remove-Item -Path $extractTmp -Recurse -Force -ErrorAction SilentlyContinue
-                        return $false
-                    }
+                if ($Backup) {
+                    $bak = "$target.bak_$(Get-Date -f yyyyMMddHHmmss)"
+                    try { Move-Item $target $bak -Force }
+                    catch { Write-Warning "Backup failed: $($_.Exception.Message)"; Remove-Item $tmp -Recurse -Force; return $false }
                 }
-                elseif ($ForceOverwrite) {
-                    try {
-                        Remove-Item -Path $target -Recurse -Force -ErrorAction Stop
-                        Write-Host "Removed existing target $target" -ForegroundColor Magenta
-                    }
-                    catch {
-                        Write-Warning "Remove failed: $($_.Exception.Message)"
-                        Remove-Item -Path $extractTmp -Recurse -Force -ErrorAction SilentlyContinue
-                        return $false
-                    }
+                elseif ($Force) {
+                    try { Remove-Item $target -Recurse -Force }
+                    catch { Write-Warning "Remove failed: $($_.Exception.Message)"; Remove-Item $tmp -Recurse -Force; return $false }
                 }
                 else {
-                    $resp = Read-Host "Target $target exists. Overwrite? (Y/N)"
-                    if ($resp -notmatch '^[Yy]') {
-                        Write-Host "Aborted by user." -ForegroundColor Yellow
-                        if (Test-Path $extractTmp) { Remove-Item -Path $extractTmp -Recurse -Force -ErrorAction SilentlyContinue }
-                        return $false
-                    }
-                    try { Remove-Item -Path $target -Recurse -Force -ErrorAction Stop } catch { Write-Warning "Remove failed: $($_.Exception.Message)"; Remove-Item -Path $extractTmp -Recurse -Force -ErrorAction SilentlyContinue; return $false }
+                    $ans = Read-Host "Target exists. Overwrite? (Y/N)"
+                    if ($ans -notmatch '^[Yy]') { Remove-Item $tmp -Recurse -Force; return $false }
+                    try { Remove-Item $target -Recurse -Force }
+                    catch { Write-Warning "Remove failed: $($_.Exception.Message)"; Remove-Item $tmp -Recurse -Force; return $false }
                 }
             }
         }
         else {
-            # create target if missing (unless WhatIf)
-            if ($WhatIf) { Write-Host "[WhatIf] Would create target directory: $target" -ForegroundColor Cyan }
-            else { New-Item -Path $target -ItemType Directory -Force | Out-Null; Write-Host "Created target: $target" -ForegroundColor Green }
+            if ($W) { Write-Host "[WhatIf] mkdir $target" -Foreground Cyan }
+            else { New-Item $target -ItemType Directory -Force | Out-Null }
         }
 
-        # Copy only children of tools -> target root
-        if ($WhatIf) {
-            Write-Host "[WhatIf] Would copy contents of: $sourceTools\* -> $target\" -ForegroundColor Cyan
-            # cleanup not required for WhatIf
-            return $true
-        }
+        # --- Copy ---
+        if ($W) { Write-Host "[WhatIf] copy $src/* -> $target" -Foreground Cyan; return $true }
 
         try {
-            # enumerate children (files and directories)
-            $children = Get-ChildItem -LiteralPath $sourceTools -Force
-            foreach ($child in $children) {
-                $sourcePath = $child.FullName
-                $destPath = Join-Path $target $child.Name
-
-                if ($child.PSIsContainer) {
-                    # it's a directory: copy whole directory as a subfolder (preserve folder name)
-                    if (Test-Path -Path $destPath) {
-                        try { Remove-Item -Path $destPath -Recurse -Force -ErrorAction Stop } 
-                        catch { Write-Warning "Failed to remove existing folder $destPath : $($_.Exception.Message)"; continue }
-                    }
-                    Copy-Item -LiteralPath $sourcePath -Destination $destPath -Recurse -Force
+            Get-ChildItem $src -Force | ForEach-Object {
+                $dest = Join-Path $target $_.Name
+                if ($_.PSIsContainer) {
+                    if (Test-Path $dest) { Remove-Item $dest -Recurse -Force }
+                    Copy-Item $_.FullName $dest -Recurse -Force
                 }
                 else {
-                    # it's a file: copy into target (root)
-                    Copy-Item -LiteralPath $sourcePath -Destination $target -Force
+                    Copy-Item $_.FullName $target -Force
                 }
             }
-            Write-Host "Copied tools/* -> $target (folders preserved)" -ForegroundColor Green
         }
-        catch {
-            Write-Warning "Copy failed: $($_.Exception.Message)"
-            if (Test-Path $extractTmp) { Remove-Item -Path $extractTmp -Recurse -Force -ErrorAction SilentlyContinue }
-            return $false
-        }
+        catch { Write-Warning "Copy failed: $($_.Exception.Message)"; Remove-Item $tmp -Recurse -Force; return $false }
 
-        # cleanup extracted temp
-        if (Test-Path $extractTmp) {
-            try { Remove-Item -Path $extractTmp -Recurse -Force -ErrorAction SilentlyContinue } catch { /* ignore */ }
-        }
-
+        Remove-Item $tmp -Recurse -Force
         return $true
     }
-  
-
+    [bool] GetPip() { return $this.GetPip($false) }
     [bool] GetPip([bool] $whatIf = $false) {
         if (-not $this.Config) { Write-Warning "Config null"; return $false }
         $pyExe = Join-Path $this.Config['PyDir'] 'python.exe'
@@ -694,29 +570,10 @@ Class PythonDev {
             }
         }
     }
-
-    # === Method: TestPythonGlobal ===
-    # Usage:
-    #   $res = $this.TestPythonGlobal()                 # probe python and pip (embedded preferred)
-    #   $res = $this.TestPythonGlobal($false)           # probe python only (no pip)
-    # Returns: PSCustomObject with fields: Name, Exists, IsTest, Version, Path, PipInstalled, PipVersion, Notes, CheckedAt
+    [psobject] TestPythonGlobal() { return $this.TestPythonGlobal($true) }
     [psobject] TestPythonGlobal([bool] $ProbePip = $true) {
-        # reset object properties
-        $this.EmbeddedPath = $null
-        $this.EmbeddedVersion = $null
-        $this.EmbeddedPipInstalled = $false
-        $this.EmbeddedPipVersion = $null
-
-        $this.GlobalExists = $false
-        $this.GlobalPath = $null
-        $this.GlobalVersion = $null
-        $this.GlobalPipInstalled = $false
-        $this.GlobalPipVersion = $null
-
-        $this.TestLastChecked = Get-Date
         $notes = @()
 
-        # Helper: parse python version string "Python X.Y.Z" -> X.Y.Z
         function ParsePythonVersion($text) {
             if (-not $text) { return $null }
             if ($text -match 'Python\s+(\d+\.\d+(\.\d+)?)') { return $matches[1] }
@@ -728,57 +585,43 @@ Class PythonDev {
             return $null
         }
 
-        # 1) Resolve embedded python path if available in config
-        $embeddedCandidate = $null
+        # ----- Embedded python -----
+        $embeddedPath = $null
+        $embeddedVersion = $null
+        $embeddedPipInstalled = $false
+        $embeddedPipVersion = $null
+
         try {
             if ($this.Config.PyDir) {
-                $embeddedCandidate = Join-Path $this.Config.PyDir 'python.exe'
-                $embeddedCandidate = [System.IO.Path]::GetFullPath($embeddedCandidate)
-                if (-not (Test-Path -Path $embeddedCandidate)) { $embeddedCandidate = $null }
+                $p = [System.IO.Path]::GetFullPath((Join-Path $this.Config.PyDir 'python.exe'))
+                if (Test-Path $p) { $embeddedPath = $p }
             }
         }
-        catch {
-            $notes += "Error resolving Config.PyDir: $($_.Exception.Message)"
-            $embeddedCandidate = $null
-        }
+        catch { $notes += "Error resolving Config.PyDir: $($_.Exception.Message)" }
 
-        # 2) Probe embedded interpreter
-        if ($embeddedCandidate) {
-            $this.EmbeddedPath = $embeddedCandidate
+        if ($embeddedPath) {
             try {
-                $out = & $embeddedCandidate --version 2>&1
-                $out = ($out -join "`n").Trim()
-                $pv = ParsePythonVersion $out
-                if ($pv) {
-                    $this.EmbeddedVersion = $pv
-                }
-                else {
-                    # still store raw output as note if cannot parse
-                    $notes += "Embedded python --version returned unexpected output: $out"
-                }
+                $out = & $embeddedPath --version 2>&1 | Out-String
+                $out = $out.Trim()
+                $embeddedVersion = ParsePythonVersion $out
+                if (-not $embeddedVersion) { $notes += "Embedded python --version output: $out" }
             }
             catch {
-                $notes += "Failed to execute embedded python: $($_.Exception.Message)"
+                $notes += "Failed to exec embedded python: $($_.Exception.Message)"
             }
 
             if ($ProbePip) {
                 try {
-                    $pout = & $embeddedCandidate -m pip --version 2>&1
-                    $pout = ($pout -join "`n").Trim()
-                    $pp = ParsePipVersion $pout
-                    if ($pp) {
-                        $this.EmbeddedPipInstalled = $true
-                        $this.EmbeddedPipVersion = $pp
-                    }
+                    $pout = & $embeddedPath -m pip --version 2>&1 | Out-String
+                    $pout = $pout.Trim()
+                    $embeddedPipVersion = ParsePipVersion $pout
+                    if ($embeddedPipVersion) { $embeddedPipInstalled = $true }
                     else {
-                        # pip command may fail or not be present
-                        $this.EmbeddedPipInstalled = $false
-                        $notes += "Embedded python pip check returned unexpected output or not installed: $pout"
+                        $notes += "Embedded pip check unexpected / not installed: $pout"
                     }
                 }
                 catch {
-                    # pip not installed or error running
-                    $this.EmbeddedPipInstalled = $false
+                    $embeddedPipInstalled = $false
                     $notes += "Embedded pip probe failed: $($_.Exception.Message)"
                 }
             }
@@ -787,189 +630,222 @@ Class PythonDev {
             $notes += "Embedded python not found at Config.PyDir (or PyDir not set)."
         }
 
-        # 3) Resolve global python (avoid WindowsApps stub)
-        $globalCandidate = $null
+        # ----- Global python -----
+        $globalPath = $null
+        $globalVersion = $null
+        $globalPipInstalled = $false
+        $globalPipVersion = $null
+
         try {
-            $cmds = Get-Command python -ErrorAction SilentlyContinue -All
+            $cmds = Get-Command python -All -ErrorAction SilentlyContinue
             if ($cmds) {
                 foreach ($c in $cmds) {
-                    $src = $null
-                    try { $src = $c.Source } catch {}
-                    # skip WindowsApps store stub
-                    if ($src -and ($src -match '\\WindowsApps\\')) { continue }
+                    $src = $null; try { $src = $c.Source } catch {}
+                    if ($src -and $src -match '\\WindowsApps\\') { continue }
                     if ($c.CommandType -in @('Application', 'ExternalScript', 'Script')) {
-                        $globalCandidate = $src
-                        break
+                        $globalPath = $src; break
                     }
                 }
             }
         }
-        catch {
-            $notes += "Get-Command python error: $($_.Exception.Message)"
-        }
+        catch { $notes += "Get-Command python error: $($_.Exception.Message)" }
 
-        # fallback to 'py' launcher (try to extract a real interpreter path)
-        if (-not $globalCandidate) {
+        if (-not $globalPath) {
             try {
                 $pyCmd = Get-Command py -ErrorAction SilentlyContinue
                 if ($pyCmd) {
-                    # 'py -0p' typically lists installed interpreters with paths; parse the first path found
                     $pyList = & py -0p 2>$null
-                    if ($pyList) {
-                        foreach ($line in $pyList) {
-                            if ($line -match '\.exe') {
-                                $tokens = $line.Trim() -split '\s+'
-                                $possible = $tokens[-1]
-                                if (Test-Path $possible) { $globalCandidate = $possible; break }
-                            }
+                    foreach ($line in $pyList) {
+                        if ($line -match '\.exe') {
+                            $possible = ($line.Trim() -split '\s+')[-1]
+                            if (Test-Path $possible) { $globalPath = $possible; break }
                         }
                     }
                 }
             }
-            catch {
-                # ignore; py may not be installed
-            }
+            catch { }
         }
 
-        # final fallback: search PATH for python.exe (avoid WindowsApps)
-        if (-not $globalCandidate) {
+        if (-not $globalPath) {
             try {
-                $pathDirs = ($env:PATH -split ';') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
-                foreach ($d in $pathDirs) {
-                    try {
-                        $candidate = Join-Path $d 'python.exe'
-                        if ((Test-Path -Path $candidate) -and ($candidate -notmatch '\\WindowsApps\\')) {
-                            $globalCandidate = $candidate
+                foreach ($d in ($env:PATH -split ';')) {
+                    $d = $d.Trim()
+                    if (-not $d) { continue }
+
+                    $candidate = Join-Path $d 'python.exe'
+                    if (Test-Path $candidate) {
+                        if ($candidate -notmatch '\\WindowsApps\\') {
+                            $globalPath = $candidate
                             break
                         }
                     }
-                    catch {}
                 }
             }
             catch {
-                $notes += "Error searching PATH: $($_.Exception.Message)"
+                $notes += "Error searching PATH for python.exe: $($_.Exception.Message)"
             }
         }
 
-        # 4) Probe global interpreter if found
-        if ($globalCandidate) {
-            $this.GlobalPath = [System.IO.Path]::GetFullPath($globalCandidate)
+
+
+        if ($globalPath) {
+            $globalPath = [System.IO.Path]::GetFullPath($globalPath)
             try {
-                $gout = & $this.GlobalPath --version 2>&1
-                $gout = ($gout -join "`n").Trim()
-                $gv = ParsePythonVersion $gout
-                if ($gv) {
-                    $this.GlobalVersion = $gv
-                    $this.GlobalExists = $true
-                }
-                else {
-                    $notes += "Global python --version returned unexpected output: $gout"
-                }
+                $gout = & $globalPath --version 2>&1 | Out-String
+                $gout = $gout.Trim()
+                $globalVersion = ParsePythonVersion $gout
+                if (-not $globalVersion) { $notes += "Global python --version output: $gout" }
             }
             catch {
-                $notes += "Failed to execute global python: $($_.Exception.Message)"
+                $notes += "Failed to exec global python: $($_.Exception.Message)"
             }
+
 
             if ($ProbePip) {
                 try {
-                    $gpout = & $this.GlobalPath -m pip --version 2>&1
-                    $gpout = ($gpout -join "`n").Trim()
-                    $gpp = ParsePipVersion $gpout
-                    if ($gpp) {
-                        $this.GlobalPipInstalled = $true
-                        $this.GlobalPipVersion = $gpp
-                    }
+                    $gpout = & $globalPath -m pip --version 2>&1 | Out-String
+                    $gpout = $gpout.Trim()
+                    $globalPipVersion = ParsePipVersion $gpout
+                    if ($globalPipVersion) { $globalPipInstalled = $true }
                     else {
-                        $this.GlobalPipInstalled = $false
-                        $notes += "Global pip check returned unexpected output or not installed: $gpout"
+                        $notes += "Global pip check unexpected / not installed: $gpout"
                     }
                 }
                 catch {
-                    $this.GlobalPipInstalled = $false
+                    $globalPipInstalled = $false
                     $notes += "Global pip probe failed: $($_.Exception.Message)"
                 }
+
             }
         }
         else {
             $notes += "No usable global python found (PATH and py launcher searched)."
         }
-        $hasEmbedded = -not [string]::IsNullOrWhiteSpace($this.EmbeddedPath)
-        $hasGlobal = -not [string]::IsNullOrWhiteSpace($this.GlobalPath)
 
-        # 5) Build result summary object for caller
-        $summary = [PSCustomObject]@{
+        # ----- Build summary -----
+        $version = if ($embeddedVersion) { $embeddedVersion } else { $globalVersion }
+        $path = if ($embeddedPath) { $embeddedPath }    else { $globalPath }
+        $pipInstalled = [bool]($embeddedPipInstalled -or $globalPipInstalled)
+        $pipVersion = if ($embeddedPipVersion) { $embeddedPipVersion } else { $globalPipVersion }
+
+        $summary = [pscustomobject]@{
             Name         = 'Python'
-            Exists       = ($hasEmbedded -or $hasGlobal)
-            IsTest       = $false    # will set below
-            Version      = $this.GetFirstNonNull(@('EmbeddedVersion', 'GlobalVersion'))
-            Path         = $this.GetFirstNonNull(@('EmbeddedPath', 'GlobalPath'))
-            PipInstalled = $this.GetFirstNonNull(@('EmbeddedPipInstalled', 'GlobalPipInstalled'))
-            PipVersion   = $this.GetFirstNonNull(@('EmbeddedPipVersion', 'GlobalPipVersion'))
+            Exists       = [bool]($path)
+            IsTest       = [bool]$version
+            Version      = $version
+            Path         = $path
+            PipInstalled = $pipInstalled
+            PipVersion   = $pipVersion
             Notes        = ($notes -join '; ')
-            CheckedAt    = $this.TestLastChecked
+            CheckedAt    = Get-Date
         }
 
-        # Determine IsTest policy:
-        # - if interpreter version found -> IsTest = $true
-        # - else false
-        if ($summary.Version) { $summary.IsTest = $true } else { $summary.IsTest = $false }
-
-        # Save notes property to instance (concatenate)
         $this.Report = $summary.Notes
-
         return $summary
     }
+
     [bool] Extract7z([string] $Source, [string] $OutPath) {
         try {
-            # Ensure destination
-            if (-not (Test-Path $OutPath)) { New-Item -Path $OutPath -ItemType Directory -Force | Out-Null }
-
-            # If Source is URL, download to cache
-            if ($Source -match '^https?://') {
-                # หา cache directory อย่างปลอดภัย (รองรับ PS5.1)
-                if ($this -and $this.PSObject.Properties.Match('CacheDir').Count -gt 0 -and $this.CacheDir) {
-                    $cacheBase = $this.CacheDir
-                }
-                elseif ($this -and $this.PSObject.Properties.Match('Cache').Count -gt 0 -and $this.Cache) {
-                    # ถ้าคลาสใช้ชื่อ property เป็น 'Cache' แทน 'CacheDir'
-                    $cacheBase = $this.Cache
-                }
-                else {
-                    $cacheBase = Join-Path $this.AbsRoot 'cache'
-                }
-
-                $cdl = Join-Path $cacheBase (Split-Path $Source -Leaf)
-               
-                if (-not (Test-Path $cdl)) {
-                    Invoke-WebRequest -Uri $Source -OutFile $cdl -UseBasicParsing -ErrorAction Stop
-                }
-                $Source = $cdl
+            # --- ensure OutPath exists (ที่ติดตั้งจริง เช่น driver\xxx) ---
+            if (-not (Test-Path -LiteralPath $OutPath)) {
+                New-Item -Path $OutPath -ItemType Directory -Force | Out-Null
             }
 
-            # find 7z/7zr
+            # --- หา DLDir = โฟลเดอร์ Download หลักของโปรเจกต์ ---
+            $dlDir = $null
+
+            # ถ้ามี Config.DLDir ให้ใช้ก่อน
+            if ($this -and $this.PSObject.Properties.Match('Config').Count -gt 0 -and $this.Config) {
+                if ($this.Config -is [hashtable]) {
+                    if ($this.Config.ContainsKey('DLDir')) { $dlDir = $this.Config['DLDir'] }
+                }
+                else {
+                    if ($this.Config.PSObject.Properties.Match('DLDir').Count -gt 0) {
+                        $dlDir = $this.Config.DLDir
+                    }
+                }
+            }
+
+            # ถ้ายังไม่มี DLDir → default = ROOT\Download
+            if (-not $dlDir) {
+                $root = $null
+                if ($this -and $this.PSObject.Properties.Match('RootDir').Count -gt 0 -and $this.RootDir) {
+                    $root = $this.RootDir
+                }
+                elseif ($this -and $this.PSObject.Properties.Match('AbsRoot').Count -gt 0 -and $this.AbsRoot) {
+                    $root = $this.AbsRoot
+                }
+                else {
+                    $root = (Get-Location).Path
+                }
+                $dlDir = Join-Path $root 'Download'
+            }
+
+            if (-not (Test-Path -LiteralPath $dlDir)) {
+                New-Item -Path $dlDir -ItemType Directory -Force | Out-Null
+            }
+
+            # --- ถ้า Source เป็น URL -> ดาวน์โหลดเก็บใน Download ---
+            if ($Source -match '^https?://') {
+                $fileName = Split-Path $Source -Leaf
+                if (-not $fileName) { $fileName = 'download.bin' }
+                $localPath = Join-Path $dlDir $fileName
+
+                if (-not (Test-Path -LiteralPath $localPath)) {
+                    Write-Host "Downloading: $Source -> $localPath"
+                    Invoke-WebRequest -Uri $Source -OutFile $localPath -UseBasicParsing -ErrorAction Stop
+                }
+                else {
+                    Write-Host "Using cached download: $localPath"
+                }
+
+                $Source = $localPath
+            }
+
+            # --- ตรวจว่า source file มีอยู่จริง ---
+            if (-not (Test-Path -LiteralPath $Source)) {
+                Write-Warning "Extract7z: source file not found: $Source"
+                return $false
+            }
+
+            # --- หา 7z หรือโหลด 7zr.exe ลง Download เป็น cache ---
             $seven = $null
             $candidates = @(
                 'C:\Program Files\7-Zip\7z.exe',
                 'C:\Program Files (x86)\7-Zip\7z.exe'
             )
-            foreach ($p in $candidates) { if (Test-Path $p) { $seven = $p; break } }
+
+            foreach ($p in $candidates) {
+                if (Test-Path -LiteralPath $p) { $seven = $p; break }
+            }
+
             if (-not $seven) {
                 $cmd = Get-Command 7z -ErrorAction SilentlyContinue
                 if ($cmd) { $seven = $cmd.Path }
             }
+
             if (-not $seven) {
-                $cached7zr = Join-Path $this.GetCacheBase() '7zr.exe'
-                if (-not (Test-Path $cached7zr)) {
-                    # download portable 7zr
-                    Invoke-WebRequest -Uri 'https://www.7-zip.org/a/7zr.exe' -OutFile $cached7zr -UseBasicParsing -ErrorAction Stop
+                # โหลด portable 7zr.exe เก็บไว้ใน Download
+                $cached7zr = Join-Path $dlDir '7zr.exe'
+                if (-not (Test-Path -LiteralPath $cached7zr)) {
+                    Write-Host "Downloading portable 7zr.exe -> $cached7zr"
+                    Invoke-WebRequest -Uri 'https://www.7-zip.org/a/7zr.exe' `
+                        -OutFile $cached7zr `
+                        -UseBasicParsing -ErrorAction Stop
                 }
                 $seven = $cached7zr
             }
 
-            # run extraction
+            # --- run extraction ---
             $args = @('x', $Source, "-o$OutPath", '-y')
             $proc = Start-Process -FilePath $seven -ArgumentList $args -NoNewWindow -Wait -PassThru
-            return ($proc.ExitCode -eq 0)
+
+            if ($proc.ExitCode -ne 0) {
+                Write-Warning "Extract7z: 7z exit code $($proc.ExitCode)"
+                return $false
+            }
+
+            return $true
         }
         catch {
             Write-Warning "Extract7z failed: $($_.Exception.Message)"
@@ -977,310 +853,306 @@ Class PythonDev {
         }
     }
 
-    [string] GetPGit() {
-        try {
-            # 1) Existing local (prefer configured PGit)
-            try { $local = $this.GetGitPath() } catch { $local = $null }
-            if ($local) { return [string]$local }
 
-            # 2) Fallback: query GitHub releases for PortableGit -64-bit.7z.exe
-            $api = 'https://api.github.com/repos/git-for-windows/git/releases/latest'
-            $headers = @{ 'User-Agent' = 'PS-GetPGit' }
+
+
+    [string] GetLatestReleaseAssetUrl(
+        [string] $repo,
+        [string] $namePattern,
+        [string] $userAgent = 'PS-AssetProbe'
+    ) {
+        try {
+            $api = "https://api.github.com/repos/$repo/releases/latest"
+            $headers = @{ 'User-Agent' = $userAgent }
             $rel = Invoke-RestMethod -Uri $api -Headers $headers -ErrorAction Stop
-            $pattern = '(?i)^.*PortableGit.*-64-bit\.7z\.exe$'
-            $asset = ($rel.assets | Where-Object { $_.name -match $pattern } | Select-Object -First 1)
+
+            if (-not $rel.assets) { return $null }
+
+            $asset = $rel.assets |
+            Where-Object { $_.name -match $namePattern } |
+            Select-Object -First 1
+
             if ($asset) { return [string]$asset.browser_download_url }
             return $null
+        }
+        catch {
+            Write-Warning "GetLatestReleaseAssetUrl($repo) error: $($_.Exception.Message)"
+            return $null
+        }
+    }
+
+    [bool] InstallArchiveTool(
+        [string] $name,             # "FFmpeg" / "PortableGit"
+        [string] $src,              # URL หรือ path
+        [string] $defaultSubDir,    # "driver\ffmpeg" / "driver\PortableGit"
+        [ref]    $configPathRef,    # [ref]$this.Config.FFmpeg / [ref]$this.Config.PGit
+        [bool]   $WhatIf = $false
+    ) {
+        if (-not $src) {
+            Write-Warning "Install $name : no source URL/path provided."
+            return $false
+        }
+
+        # DLDir
+        $dlDir = $this.Config.DLDir
+        if (-not $dlDir) {
+            $dlDir = Join-Path $this.RootDir 'Download'
+            $this.Config.DLDir = $dlDir   # ตั้งให้ config ด้วยเลย
+        }
+
+        if (-not (Test-Path $dlDir)) {
+            if ($WhatIf) {
+                Write-Host "[WhatIf] Would create download dir: $dlDir"
+            }
+            else {
+                New-Item -Path $dlDir -ItemType Directory -Force | Out-Null
+            }
+        }
+
+        # resolve downloaded file path
+        $isUrl = $src -match '^https?://'
+        $dl = $src
+
+        if ($isUrl) {
+            $fileName = [System.IO.Path]::GetFileName($src)
+            if (-not $fileName) { $fileName = "$name-latest.7z" }
+            $dl = Join-Path $dlDir $fileName
+
+            if ($WhatIf) {
+                Write-Host "[WhatIf] Would download $name : $src -> $dl"
+            }
+            else {
+                Write-Host "Downloading $name from: $src"
+                try {
+                    Invoke-WebRequest -Uri $src -OutFile $dl -UseBasicParsing -TimeoutSec 600 -ErrorAction Stop
+                }
+                catch {
+                    Write-Warning "Install $name : download failed: $($_.Exception.Message)"
+                    return $false
+                }
+            }
+        }
+
+        # target dir
+        $cfgPath = $configPathRef.Value
+        if (-not $cfgPath) {
+            $cfgPath = Join-Path $this.RootDir $defaultSubDir
+            $configPathRef.Value = $cfgPath
+        }
+
+        if (Test-Path $cfgPath) {
+            if ($WhatIf) {
+                Write-Host "[WhatIf] Would remove existing $name dir: $cfgPath"
+            }
+            else {
+                try { Remove-Item -Path $cfgPath -Recurse -Force -ErrorAction Stop }
+                catch {
+                    Write-Warning "Install $name : failed to remove existing dir: $($_.Exception.Message)"
+                    return $false
+                }
+            }
+        }
+
+        if ($WhatIf) {
+            Write-Host "[WhatIf] Would extract $dl -> $cfgPath"
+            return $true
+        }
+
+        $ok = $this.Extract7z($dl, $cfgPath)
+        if (-not $ok) {
+            Write-Warning "Install $name : Extract7z returned failure."
+            return $false
+        }
+
+        Write-Host "$name installed to: $cfgPath"
+        return $true
+    }
+
+    [string] GetFFmpeg() {
+        try {
+            return $this.GetLatestReleaseAssetUrl(
+                'GyanD/codexffmpeg',
+                '^ffmpeg-.*-full_build\.zip$',
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36'
+            )
+        }
+        catch {
+            Write-Warning "GetFFmpeg error: $($_.Exception.Message)"
+            return $null
+        }
+    }
+
+    [string] GetPGit() {
+        try {
+            return $this.GetLatestReleaseAssetUrl(
+                'git-for-windows/git',
+                'PortableGit.*-64-bit\.7z\.exe$',
+                'PS-GetPGit'
+            )
         }
         catch {
             Write-Warning "GetPGit error: $($_.Exception.Message)"
             return $null
         }
     }
+    
+    [bool] InstallFFmpeg([bool] $WhatIf = $false) {
+        # 1) ขอ URL ล่าสุดจาก GitHub
+        $src = $this.GetFFmpeg()
+        if (-not $src) {
+            Write-Warning "InstallFFmpeg: GetFFmpeg() did not return any source."
+            return $false
+        }
 
-    # InstallPGit method with pre-checks: detects local git version, compares to remote, avoids redownload if file exists,
-    # extracts archive to Config.PGit, and obeys flags configured in this.Config.InstallOptions (Hashtable or PSCustomObject).
-    # This method is intended to be pasted into a PowerShell class (as a method). It uses zero-argument InstallPGit() and reads flags
-    # from this.Config.InstallOptions to avoid default parameter issues in PowerShell class methods.
-    [pscustomobject] InstallPGit() {
-        $result = [pscustomobject]@{
-            Success       = $false
-            Action        = $null
-            Path          = $null
-            LocalVersion  = $null
-            RemoteVersion = $null
-            Error         = $null
+        # 2) ให้ InstallArchiveTool โหลด + แตกลง driver\ffmpeg
+        $ok = $this.InstallArchiveTool(
+            'FFmpeg',
+            $src,
+            'driver\ffmpeg',          # ติดตั้งไว้ใต้ ROOT\driver\ffmpeg\XXX...
+            [ref]$this.Config.FFmpeg, # ชี้ config ไปที่ ROOT\driver\ffmpeg
+            $WhatIf
+        )
+
+        if (-not $ok -or $WhatIf) {
+            return $ok
         }
 
         try {
-            # ---------- Read flags from Config.InstallOptions (support Hashtable or PSCustomObject) ----------
-            $opts = $null
-            if ($this -and $this.PSObject.Properties.Match('Config').Count -gt 0 -and $this.Config) {
-                if ($this.Config -is [hashtable]) {
-                    if ($this.Config.ContainsKey('InstallOptions') -and $this.Config['InstallOptions']) { $opts = $this.Config['InstallOptions'] }
-                }
-                else {
-                    if ($this.Config.PSObject.Properties.Match('InstallOptions').Count -gt 0 -and $this.Config.InstallOptions) { $opts = $this.Config.InstallOptions }
-                }
-            }
-
-            # read individual flags from opts (supports hashtable or object)
-            $Force = $false; $AutoUpdate = $false; $WhatIf = $false
-            if ($opts) {
-                if ($opts -is [hashtable]) {
-                    if ($opts.ContainsKey('Force')) { $Force = [bool]$opts['Force'] }
-                    if ($opts.ContainsKey('AutoUpdate')) { $AutoUpdate = [bool]$opts['AutoUpdate'] }
-                    if ($opts.ContainsKey('WhatIf')) { $WhatIf = [bool]$opts['WhatIf'] }
-                }
-                else {
-                    if ($opts.PSObject.Properties.Match('Force').Count -gt 0) { $Force = [bool]$opts.Force }
-                    if ($opts.PSObject.Properties.Match('AutoUpdate').Count -gt 0) { $AutoUpdate = [bool]$opts.AutoUpdate }
-                    if ($opts.PSObject.Properties.Match('WhatIf').Count -gt 0) { $WhatIf = [bool]$opts.WhatIf }
-                }
-            }
-
-            # ---------- Require Config.DLDir and Config.PGit (fail-fast) ----------
-            if (-not ($this -and $this.PSObject.Properties.Match('Config').Count -gt 0 -and $this.Config)) {
-                Write-Error "Config is not set on this instance. Set this.Config before calling InstallPGit()."
-                $result.Error = "Config missing"
-                return $result
-            }
-
-            # DLDir
-            $dlDir = $null
+            # 3) หา root ของ ffmpeg จาก Config
+            $ffRoot = $null
             if ($this.Config -is [hashtable]) {
-                if ($this.Config.ContainsKey('DLDir') -and $this.Config['DLDir']) { $dlDir = $this.Config['DLDir'] }
+                if ($this.Config.ContainsKey('FFmpeg')) { $ffRoot = $this.Config['FFmpeg'] }
             }
             else {
-                if ($this.Config.PSObject.Properties.Match('DLDir').Count -gt 0 -and $this.Config.DLDir) { $dlDir = $this.Config.DLDir }
-            }
-            if (-not $dlDir) {
-                Write-Error "Config.DLDir is not set. Please set this.Config.DLDir before calling InstallPGit()."
-                $result.Error = "Config.DLDir missing"
-                return $result
-            }
-            if (-not (Test-Path $dlDir)) { New-Item -Path $dlDir -ItemType Directory -Force | Out-Null }
-
-            # PGit
-            $cfgPgit = $null
-            if ($this.Config -is [hashtable]) {
-                if ($this.Config.ContainsKey('PGit') -and $this.Config['PGit']) { $cfgPgit = $this.Config['PGit'] }
-            }
-            else {
-                if ($this.Config.PSObject.Properties.Match('PGit').Count -gt 0 -and $this.Config.PGit) { $cfgPgit = $this.Config.PGit }
-            }
-            if (-not $cfgPgit) {
-                Write-Error "Config.PGit is not set. Please set this.Config.PGit before calling InstallPGit()."
-                $result.Error = "Config.PGit missing"
-                return $result
-            }
-
-            # ---------- Detect existing git (local) ----------
-            $localGitPath = $null; $localVersion = $null
-            # prefer Config.PGit location if it exists
-            if ($cfgPgit -and (Test-Path $cfgPgit)) {
-                $foundLocal = Get-ChildItem -Path $cfgPgit -Filter 'git.exe' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-                if ($foundLocal) { $localGitPath = $foundLocal.FullName }
-            }
-            # fallback to PATH
-            if (-not $localGitPath) {
-                $cmd = Get-Command git -ErrorAction SilentlyContinue
-                if ($cmd -and $cmd.Path -and (Test-Path $cmd.Path)) { $localGitPath = $cmd.Path }
-            }
-            if ($localGitPath) {
-                try {
-                    $verOut = & $localGitPath --version 2>$null
-                    # parse "git version X.Y.Z"
-                    if ($verOut -match '([0-9]+(?:\.[0-9]+)+)') { $localVersion = $Matches[1] }
-                    $result.LocalVersion = $localVersion
+                if ($this.Config.PSObject.Properties.Match('FFmpeg').Count -gt 0) {
+                    $ffRoot = $this.Config.FFmpeg
                 }
-                catch { $localVersion = $null }
             }
 
-            # ---------- Determine remote/latest source via GetPGit() ----------
-            $source = $this.GetPGit()
-            if (-not $source) {
-                Write-Error "GetPGit() returned null. Cannot determine remote PortableGit source."
-                $result.Error = "GetPGit returned null"
-                return $result
+            if (-not $ffRoot) {
+                Write-Warning "InstallFFmpeg: Config.FFmpeg not set after InstallArchiveTool."
+                return $false
             }
 
-            # If source is a local git.exe path, behave as adopt/local case
-            if ($source -match 'git\.exe$' -and (Test-Path $source)) {
-                $cmdDir = Split-Path $source; $gitRoot = Split-Path $cmdDir
-                if ($this.Config -is [hashtable]) { $this.Config['PGit'] = $gitRoot } else { $this.Config.PGit = $gitRoot }
-                $result.Success = $true; $result.Action = 'used-local'; $result.Path = $gitRoot
-                return $result
+            if (-not (Test-Path -LiteralPath $ffRoot)) {
+                Write-Warning "InstallFFmpeg: FFmpeg root dir does not exist: $ffRoot"
+                return $false
             }
 
-            # If source is a URL, try to infer remote version from filename (PortableGit-<ver>-64-bit.7z.exe)
-            $remoteVersion = $null; $assetName = $null
-            if ($source -match '^https?://') {
-                $assetName = Split-Path $source -Leaf
-                if ($assetName -match 'PortableGit-([0-9]+(?:\.[0-9]+)+)') { $remoteVersion = $Matches[1] }
-                $result.RemoteVersion = $remoteVersion
-            }
-            else {
-                # local archive
-                $assetName = Split-Path $source -Leaf
-                if ($assetName -match 'PortableGit-([0-9]+(?:\.[0-9]+)+)') { $remoteVersion = $Matches[1] }
-                $result.RemoteVersion = $remoteVersion
+            # 4) หาโฟลเดอร์ XXX ที่ข้างในมี bin\ffmpeg.exe เช่น ffmpeg-8.0.1-full_build
+            $subDirs = Get-ChildItem -Path $ffRoot -Directory -ErrorAction SilentlyContinue
+            $ffBuildDir = $null
+
+            foreach ($d in $subDirs) {
+                $bin = Join-Path $d.FullName 'bin'
+                $ffexe = Join-Path $bin 'ffmpeg.exe'
+                if (Test-Path -LiteralPath $ffexe) {
+                    $ffBuildDir = $d.FullName
+                    break
+                }
             }
 
-            # ---------- Compare versions if localVersion available ----------
-            if ($localVersion -and $remoteVersion) {
-                # basic semver compare by splitting numeric parts
-                function Compare-SemVer($a, $b) {
-                    $pa = $a -split '\.' | ForEach-Object { [int]$_ }
-                    $pb = $b -split '\.' | ForEach-Object { [int]$_ }
-                    for ($i = 0; $i -lt [Math]::Max($pa.Length, $pb.Length); $i++) {
-                        $va = 0; $vb = 0
-                        if ($i -lt $pa.Length) { $va = $pa[$i] }
-                        if ($i -lt $pb.Length) { $vb = $pb[$i] }
-                        if ($va -lt $vb) { return -1 }
-                        if ($va -gt $vb) { return 1 }
+            # fallback: ถ้ามี subdir เดียวก็เดาว่าเป็นมัน
+            if (-not $ffBuildDir -and $subDirs.Count -eq 1) {
+                $ffBuildDir = $subDirs[0].FullName
+            }
+
+            if (-not $ffBuildDir) {
+                Write-Warning "InstallFFmpeg: Could not locate build dir (no XXX\bin\ffmpeg.exe under $ffRoot)."
+                return $false
+            }
+
+            $binDir = Join-Path $ffBuildDir 'bin'
+            $targets = @('ffmpeg.exe', 'ffplay.exe', 'ffprobe.exe')
+            $moved = 0
+
+            # 5) ย้าย exe จาก XXX\bin ขึ้นมาไว้ที่ root driver\ffmpeg
+            foreach ($name in $targets) {
+                $srcExe = Join-Path $binDir $name
+                $destExe = Join-Path $ffRoot $name
+
+                if (Test-Path -LiteralPath $srcExe) {
+                    try {
+                        # ใช้ Move-Item = ย้ายออกจาก XXX/bin
+                        Move-Item -LiteralPath $srcExe -Destination $destExe -Force -ErrorAction Stop
+                        Write-Host "InstallFFmpeg: Moved $name -> $destExe"
+                        $moved++
                     }
-                    return 0
-                }
-
-                $cmp = Compare-SemVer $localVersion $remoteVersion
-                if ($cmp -ge 0 -and -not $Force) {
-                    Write-Host "Local git version $localVersion is up-to-date (remote $remoteVersion). Nothing to do." -ForegroundColor Green
-                    $result.Success = $true; $result.Action = 'uptodate'; $result.Path = Split-Path $localGitPath -Parent
-                    return $result
-                }
-                # if local older
-                if ($cmp -lt 0) {
-                    if (-not $AutoUpdate) {
-                        # interactive prompt to confirm update (unless WhatIf or Force)
-                        if ($WhatIf) {
-                            Write-Host "[WhatIf] Would update git from $localVersion to $remoteVersion"
-                        }
-                        else {
-                            $confirm = Read-Host "Local git ($localVersion) is older than remote ($remoteVersion). Update? (Y/n)"
-                            if ($confirm -ne '' -and $confirm -notmatch '^[Yy]') {
-                                $result.Success = $false; $result.Action = 'cancelled'; $result.Path = Split-Path $localGitPath -Parent
-                                return $result
-                            }
-                        }
-                    }
-                    # if AutoUpdate or user confirmed, proceed to download/install unless Force prevents? Force forces download anyway
-                }
-            }
-
-            # ---------- Determine local archive path in dlDir (avoid re-download) ----------
-            $dl = $null
-            if ($assetName) {
-                $candidate = Join-Path $dlDir $assetName
-                if (Test-Path $candidate) { $dl = $candidate }
-            }
-
-            # If no local archive present or Force requested, download from remote source
-            if (-not $dl) {
-                if ($source -match '^https?://') {
-                    $dl = Join-Path $dlDir (Split-Path $source -Leaf)
-                    if ($Force -or -not (Test-Path $dl)) {
-                        if ($WhatIf) { Write-Host "[WhatIf] Would download $source -> $dl" }
-                        else {
-                            try {
-                                Invoke-WebRequest -Uri $source -OutFile $dl -UseBasicParsing -ErrorAction Stop
-                            }
-                            catch {
-                                Write-Error "Download failed: $($_.Exception.Message)"
-                                $result.Error = "Download failed"
-                                return $result
-                            }
-                        }
-                    }
-                    else {
-                        Write-Host "Using existing archive: $dl" -ForegroundColor DarkGray
+                    catch {
+                        Write-Warning "InstallFFmpeg: Failed to move $name : $($_.Exception.Message)"
                     }
                 }
                 else {
-                    # source is a local archive path (not URL)
-                    if (Test-Path $source) { $dl = $source } else {
-                        Write-Error "Source archive not found: $source"
-                        $result.Error = "Source missing"
-                        return $result
-                    }
+                    Write-Host "InstallFFmpeg: $name not found under $binDir" -ForegroundColor Yellow
                 }
             }
 
-            # ---------- Extract using Extract7z ----------
-            if (-not ($this.PSObject.Methods.Match('Extract7z').Count -gt 0)) {
-                Write-Error "Extract7z method not found in class."
-                $result.Error = "Extract7z missing"
-                return $result
+            if ($moved -eq 0) {
+                Write-Warning "InstallFFmpeg: No executables were moved from $binDir."
+                return $false
             }
 
-            if ($WhatIf) {
-                Write-Host "[WhatIf] Would extract $dl -> $cfgPgit"
+            # 6) ลบโฟลเดอร์ XXX ออกให้เหลือแค่ exe ที่ root
+            try {
+                Remove-Item -LiteralPath $ffBuildDir -Recurse -Force -ErrorAction Stop
+                Write-Host "InstallFFmpeg: Removed build directory: $ffBuildDir"
             }
-            else {
-                $ok = $this.Extract7z($dl, $cfgPgit)
-                if (-not $ok) {
-                    Write-Error "Extraction failed for $dl -> $cfgPgit"
-                    $result.Error = "Extraction failed"
-                    return $result
-                }
+            catch {
+                Write-Warning "InstallFFmpeg: Failed to remove build dir $ffBuildDir : $($_.Exception.Message)"
+                # ถือว่ายัง success แต่แจ้งเตือนว่าทำความสะอาดไม่หมด
             }
 
-            # ---------- verify installation ----------
-            $foundFinal = Get-ChildItem -Path $cfgPgit -Filter 'git.exe' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-            if (-not $foundFinal) {
-                Write-Error "Installation completed but git.exe not found under $cfgPgit"
-                $result.Error = "git.exe missing"
-                return $result
-            }
-
-            $gitRoot = Split-Path (Split-Path $foundFinal.FullName)
-            if ($this.Config -is [hashtable]) { $this.Config['PGit'] = $gitRoot } else { $this.Config.PGit = $gitRoot }
-
-            $result.Success = $true
-            $result.Action = 'installed'
-            $result.Path = $gitRoot
-            $result.LocalVersion = $remoteVersion  # after install assume remote version installed
-            return $result
+            Write-Host "FFmpeg runtime ready at: $ffRoot (only ffmpeg.exe / ffplay.exe / ffprobe.exe at root)."
+            return $true
         }
         catch {
-            Write-Error "InstallPGit failed: $($_.Exception.Message)"
-            $result.Error = $_.Exception.Message
-            return $result
+            Write-Warning "InstallFFmpeg: post-process failed: $($_.Exception.Message)"
+            return $false
         }
     }
-    [string] GetNvTool([string]$tool) {
-        return $this.GetNvTool($tool, $true)
+
+
+
+    [bool] InstallPGit([bool] $WhatIf = $false) {
+        $src = $this.GetPGit()
+        return $this.InstallArchiveTool(
+            'PortableGit',
+            $src,
+            'driver\PortableGit',
+            [ref]$this.Config.PGit,
+            $WhatIf
+        )
     }
-    [string] GetNvTool([string]$tool, [bool]$CheckExists = $false) {
-        <#
-    Generic fetcher for NVIDIA toolkit installers (cuda, cudnn).
-    Returns installer URL (string) or $null on failure.
-    Side-effects: NONE (will NOT set $this.NVTool, $this.NVToolLatestVersion, $this.NVToolInstallerUrl, $this.NVToolInstallerExists).
-    #>
-        $archiveUrl = $null 
-        $downloadTemplate = $null 
+
+    # ใช้เมธอดนี้เป็นตัวหลักภายใน class
+    [pscustomobject] GetNvToolInfo([string] $Tool) {
         try {
-            if (-not $tool) { throw "Tool name required (e.g. 'cuda' or 'cudnn')." }
-            $t = $tool.ToLower().Trim()
+            if (-not $Tool) { throw "Tool name required (e.g. 'cuda' or 'cudnn')." }
+            $t = $Tool.ToLower().Trim()
+
+            $archiveUrl = $null
+            $downloadPattern = $null
 
             switch ($t) {
                 'cuda' {
                     $archiveUrl = "https://developer.nvidia.com/cuda-toolkit-archive"
-                    $downloadTemplate = "https://developer.download.nvidia.com/compute/cuda/{0}/local_installers/cuda_{0}_windows.exe"
+                    $downloadPattern = "https://developer.download.nvidia.com/compute/cuda/{0}/local_installers/cuda_{0}_windows.exe"
                 }
                 'cudnn' {
                     $archiveUrl = "https://developer.nvidia.com/cudnn-archive"
-                    $downloadTemplate = "https://developer.download.nvidia.com/compute/cudnn/{0}/local_installers/cudnn_{0}_windows.exe"
+                    $downloadPattern = "https://developer.download.nvidia.com/compute/cudnn/{0}/local_installers/cudnn_{0}_windows.exe"
+                    # หมายเหตุ: cuDNN เปลี่ยน format บ่อย อันนี้ต้อง sync ตามหน้าเว็บจริง
                 }
                 default {
-                    throw "Unsupported tool: $tool. Supported: cuda, cudnn."
+                    throw "Unsupported tool: $Tool. Supported: cuda, cudnn."
                 }
             }
 
-            Write-Host "Fetching archive page for '$t': $archiveUrl"
+            Write-Host "Fetching NVIDIA archive page for '$t': $archiveUrl"
             $resp = Invoke-WebRequest -Uri $archiveUrl -UseBasicParsing -ErrorAction Stop
             $html = $resp.Content
 
+            # ดึง version candidates
             $candidates = New-Object System.Collections.Generic.HashSet[string]
 
             if ($t -eq 'cuda') {
@@ -1294,6 +1166,7 @@ Class PythonDev {
                 if ($m2.Success) { $candidates.Add($m2.Groups[1].Value.Trim()) | Out-Null }
             }
 
+            # backup: scan link text / HTML ทั่ว ๆ
             if ($resp.Links) {
                 foreach ($lnk in $resp.Links) {
                     $text = ($lnk.innerText -as [string]) -replace "`r|`n", " "
@@ -1313,62 +1186,48 @@ Class PythonDev {
                 return $null
             }
 
-            $norm = @()
-            foreach ($v in $candidates) {
-                $parts = ($v -split '\.')
+            # normalize version และเลือกตัวที่ใหญ่สุด
+            $norm = foreach ($v in $candidates) {
+                $parts = $v -split '\.'
                 if ($parts.Count -eq 2) { $parts += '0' }
                 while ($parts.Count -lt 3) { $parts += '0' }
-                $major = [int]$parts[0]; $minor = [int]$parts[1]; $patch = [int]$parts[2]
+                $major = [int]$parts[0]
+                $minor = [int]$parts[1]
+                $patch = [int]$parts[2]
                 $score = $major * 1000000 + $minor * 1000 + $patch
-                $norm += [pscustomobject]@{ Ver = "$major.$minor.$patch"; Score = $score }
+
+                [pscustomobject]@{
+                    Ver   = "$major.$minor.$patch"
+                    Score = $score
+                }
             }
 
-            $best = ($norm | Sort-Object -Property Score -Descending | Select-Object -First 1)
+            $best = $norm | Sort-Object -Property Score -Descending | Select-Object -First 1
             $version = $best.Ver
+
             Write-Host "Selected latest version for $t : $version"
 
-            $installerUrl = [string]::Format($downloadTemplate, $version)
+            $installerUrl = [string]::Format($downloadPattern, $version)
             Write-Host "Mapped installer URL: $installerUrl"
 
-            $exists = $null
-            if ($CheckExists) {
-                try {
-                    $h = Invoke-WebRequest -Uri $installerUrl -Method Head -UseBasicParsing -Headers @{ 'User-Agent' = 'PS-GetNvTool' } -TimeoutSec 15 -ErrorAction Stop
-                    $exists = ($h.StatusCode -eq 200)
-                    Write-Host "HEAD status: $($h.StatusCode)"
-                }
-                catch {
-                    try {
-                        $g = Invoke-WebRequest -Uri $installerUrl -Method Get -UseBasicParsing -Headers @{ 'User-Agent' = 'PS-GetNvTool' } -TimeoutSec 15 -MaximumRedirection 0 -ErrorAction Stop
-                        $exists = ($g.StatusCode -eq 200)
-                        Write-Host "GET status: $($g.StatusCode)"
-                    }
-                    catch {
-                        Write-Warning "Existence check failed or returned non-200. This is common for cuDNN (may require login/redirect)."
-                        $exists = $false
-                    }
-                }
+            return [pscustomobject]@{
+                Tool    = $t
+                Version = $version
+                Url     = $installerUrl
             }
-
-            # NOTE: intentionally do NOT set any $this.* NVTool fields here to avoid side-effects
-            return $installerUrl
         }
         catch {
-            Write-Error "GetNvTool($tool) failed: $($_.Exception.Message)"
+            Write-Error "GetNvToolInfo($Tool) failed: $($_.Exception.Message)"
             return $null
         }
     }
-    # Updated InstallNvidia() and CopyNvidia() methods
-    # Behavior:
-    # - Downloaded installer (e.g. cuda_13.0.2_windows.exe) is stored in this.Config.DLDir
-    # - Extract7z extracts the archive into this.Config.DLDir\<archive-base-name> (e.g. cuda_13.0.2_windows)
-    # - CopyNvidia('cuda') copies only the exact target DLL filenames (listed below) from the extracted folder(s)
-    #   into this.Config.CudaBin (driver\CUDA). CopyNvidia('cudnn') copies cudnn targets into this.Config.CuDNNBin.
-    # - No nvcc.exe verification; presence of target files is used to determine success.
-    # - Both methods are "fail-fast": require Config.DLDir and Config.CudaBin / Config.CuDNNBin to be set.
-    #
-    # Paste these methods into your class (PowerShell). They assume Extract7z() and GetNvTool() exist in the class.
-    # They return PSCustomObject summary (InstallNvidia) and void for CopyNvidia (but set instance summary props).
+
+    # wrapper เดิม เพื่อให้โค้ดเก่าที่เรียก GetNvTool() ยังใช้ได้
+    [string] GetNvTool([string] $tool) {
+        $info = $this.GetNvToolInfo($tool)
+        if ($info) { return [string]$info.Url }
+        return $null
+    }
 
     [pscustomobject] InstallNvidia([string] $Component) {
         $summary = [pscustomobject]@{
@@ -1378,42 +1237,56 @@ Class PythonDev {
         }
 
         try {
-
-           
-            # Validate component (strict, fail-fast)
             if (-not $Component) {
-                Write-Host "Component required: 'cuda','cudnn' or 'all'"
-                $summary.Error = 'Component missing'
+                $summary.Error = "Component required: 'cuda','cudnn' or 'all'"
+                Write-Host $summary.Error
                 return $summary
             }
 
             $compNorm = $Component.ToLower().Trim()
             if ($compNorm -notin @('cuda', 'cudnn', 'all')) {
-                Write-Host "Component required: 'cuda','cudnn' or 'all'"
-                $summary.Error = "Unsupported component: $Component"
+                $summary.Error = "Unsupported component: $Component (use 'cuda','cudnn','all')"
+                Write-Host $summary.Error
                 return $summary
             }
-            $requested = @()
-            switch ($compNorm) {
-                'cuda' { $requested = @('cuda') }
-                'cudnn' { $requested = @('cudnn') }
-                'all' { $requested = @('cuda', 'cudnn') }
+
+            $requested = switch ($compNorm) {
+                'cuda' { @('cuda') }
+                'cudnn' { @('cudnn') }
+                'all' { @('cuda', 'cudnn') }
             }
 
-            # require Config.DLDir
+            # require Config
             if (-not ($this -and $this.PSObject.Properties.Match('Config').Count -gt 0 -and $this.Config)) {
-                Write-Error "Config not set on instance. Set this.Config before calling InstallNvidia()."; $summary.Error = 'Config missing'; return $summary
+                $summary.Error = 'Config missing'
+                Write-Error "Config not set on instance. Set this.Config before calling InstallNvidia()."
+                return $summary
             }
 
-            # resolve DLDir
+            # DLDir
             $dlDir = $null
             if ($this.Config -is [hashtable]) { if ($this.Config.ContainsKey('DLDir')) { $dlDir = $this.Config['DLDir'] } }
             else { if ($this.Config.PSObject.Properties.Match('DLDir').Count -gt 0) { $dlDir = $this.Config.DLDir } }
-            if (-not $dlDir) { Write-Error "Config.DLDir not set. Set this.Config.DLDir before calling."; $summary.Error = 'DLDir missing'; return $summary }
+
+            if (-not $dlDir) {
+                # default = ROOT\Download แล้วเซตกลับเข้า config
+                $root = $null
+                if ($this.Config -is [hashtable]) { if ($this.Config.ContainsKey('RootDir')) { $root = $this.Config['RootDir'] } }
+                else { if ($this.Config.PSObject.Properties.Match('RootDir').Count -gt 0) { $root = $this.Config.RootDir } }
+
+                if (-not $root -and $this.PSObject.Properties.Match('AbsRoot').Count -gt 0) { $root = $this.AbsRoot }
+                if (-not $root) { $summary.Error = 'DLDir/RootDir missing' ; Write-Error "InstallNvidia: RootDir not set." ; return $summary }
+                $dlDir = Join-Path $root 'Download'
+
+                if ($this.Config -is [hashtable]) { $this.Config['DLDir'] = $dlDir }
+                else { $this.Config.DLDir = $dlDir }
+            }
+
             if (-not (Test-Path $dlDir)) { New-Item -Path $dlDir -ItemType Directory -Force | Out-Null }
 
-            # require target bins
-            $cudaBin = $null; $cudnnBin = $null
+            # CudaBin / CuDNNBin
+            $cudaBin = $null
+            $cudnnBin = $null
             if ($this.Config -is [hashtable]) {
                 if ($this.Config.ContainsKey('CudaBin')) { $cudaBin = $this.Config['CudaBin'] }
                 if ($this.Config.ContainsKey('CuDNNBin')) { $cudnnBin = $this.Config['CuDNNBin'] }
@@ -1422,59 +1295,104 @@ Class PythonDev {
                 if ($this.Config.PSObject.Properties.Match('CudaBin').Count -gt 0) { $cudaBin = $this.Config.CudaBin }
                 if ($this.Config.PSObject.Properties.Match('CuDNNBin').Count -gt 0) { $cudnnBin = $this.Config.CuDNNBin }
             }
-            if (-not $cudaBin -and $requested -contains 'cuda') { Write-Error "Config.CudaBin not set. Set this.Config.CudaBin (driver\\CUDA)"; $summary.Error = 'CudaBin missing'; return $summary }
-            if (-not $cudnnBin -and $requested -contains 'cudnn') { Write-Error "Config.CuDNNBin not set. Set this.Config.CuDNNBin (driver\\CUDNN)"; $summary.Error = 'CuDNNBin missing'; return $summary }
-            if ($cudaBin -and -not (Test-Path $cudaBin)) { New-Item -Path $cudaBin -ItemType Directory -Force | Out-Null }
+
+            if (-not $cudaBin -and $requested -contains 'cuda') {
+                $summary.Error = 'CudaBin missing'
+                Write-Error "Config.CudaBin not set. Set this.Config.CudaBin (driver\CUDA)."
+                return $summary
+            }
+            if (-not $cudnnBin -and $requested -contains 'cudnn') {
+                $summary.Error = 'CuDNNBin missing'
+                Write-Error "Config.CuDNNBin not set. Set this.Config.CuDNNBin (driver\CUDNN)."
+                return $summary
+            }
+
+            if ($cudaBin -and -not (Test-Path $cudaBin)) { New-Item -Path $cudaBin  -ItemType Directory -Force | Out-Null }
             if ($cudnnBin -and -not (Test-Path $cudnnBin)) { New-Item -Path $cudnnBin -ItemType Directory -Force | Out-Null }
 
             foreach ($comp in $requested) {
-                $detail = [pscustomobject]@{ Component = $comp; Success = $false; Archive = $null; ExtractDir = $null; Copied = 0; Missing = @(); Error = $null }
+                $detail = [pscustomobject]@{
+                    Component  = $comp
+                    Success    = $false
+                    Archive    = $null
+                    ExtractDir = $null
+                    Copied     = 0
+                    Missing    = @()
+                    Error      = $null
+                }
 
                 try {
-                    $source = $this.GetNvTool($comp, $true)
-                    if (-not $source) { $detail.Error = "GetNvTool returned null"; $summary.Details += $detail; continue }
+                    $info = $this.GetNvToolInfo($comp)
+                    if (-not $info) {
+                        $detail.Error = "GetNvToolInfo returned null"
+                        $summary.Details += $detail
+                        continue
+                    }
 
-                    # if URL -> check existing archive in dlDir; else if local path, use directly
+                    $source = $info.Url
+                    if (-not $source) {
+                        $detail.Error = "Installer URL empty"
+                        $summary.Details += $detail
+                        continue
+                    }
+
+                    # URL -> archive in DLDir
                     if ($source -match '^https?://') {
                         $leaf = Split-Path $source -Leaf
-                        $candidate = Join-Path $dlDir $leaf
-                        if (Test-Path $candidate) { $archive = $candidate }
-                        else {
-                            try { Invoke-WebRequest -Uri $source -OutFile $candidate -UseBasicParsing -ErrorAction Stop; $archive = $candidate }
-                            catch { $detail.Error = "Download failed: $($_.Exception.Message)"; $summary.Details += $detail; continue }
+                        $archive = Join-Path $dlDir $leaf
+                        if (-not (Test-Path $archive)) {
+                            try {
+                                Write-Host "Downloading $comp from: $source"
+                                Invoke-WebRequest -Uri $source -OutFile $archive -UseBasicParsing -ErrorAction Stop
+                            }
+                            catch {
+                                $detail.Error = "Download failed: $($_.Exception.Message)"
+                                $summary.Details += $detail
+                                continue
+                            }
                         }
                     }
                     else {
-                        if (Test-Path $source) { $archive = $source } else { $detail.Error = "Local source not found: $source"; $summary.Details += $detail; continue }
+                        if (Test-Path $source) { $archive = $source }
+                        else {
+                            $detail.Error = "Local source not found: $source"
+                            $summary.Details += $detail
+                            continue
+                        }
                     }
+
                     $detail.Archive = $archive
 
-                    # extract into dlDir\<archive-base-name>
-                    $base = Split-Path $archive -LeafBase
+                    # extract to DLDir\<archiveBaseName>
+                    $base = [System.IO.Path]::GetFileNameWithoutExtension($archive)
                     $outdir = Join-Path $dlDir $base
+
                     if (-not (Test-Path $outdir)) { New-Item -Path $outdir -ItemType Directory -Force | Out-Null }
                     $detail.ExtractDir = $outdir
 
-                    if (-not ($this.PSObject.Methods.Match('Extract7z').Count -gt 0)) { $detail.Error = 'Extract7z missing'; $summary.Details += $detail; continue }
+                    if (-not ($this.PSObject.Methods.Match('Extract7z').Count -gt 0)) {
+                        $detail.Error = 'Extract7z missing on instance'
+                        $summary.Details += $detail
+                        continue
+                    }
+
                     $ok = $this.Extract7z($archive, $outdir)
-                    if (-not $ok) { $detail.Error = "Extract failed"; $summary.Details += $detail; continue }
-
-                    # After extraction, copy targets
-                    if ($comp -eq 'cuda') {
-                        $copied_summary = $this.CopyNvidia('cuda')  # CopyNvidia will set instance properties and return nothing; it will locate files under dlDir candidates
-                    }
-                    else {
-                        $copied_summary = $this.CopyNvidia('cudnn')
+                    if (-not $ok) {
+                        $detail.Error = "Extract failed"
+                        $summary.Details += $detail
+                        continue
                     }
 
-                    # summarize by checking instance Missing/Copied lists if available
+                    # copy target DLLs
+                    $this.CopyNvidia($comp)
+
                     if ($comp -eq 'cuda') {
-                        try { $detail.Copied = ($this.CopiedCudaFiles.Count) } catch {}
-                        try { $detail.Missing = $this.MissingCudaFiles } catch {}
+                        try { $detail.Copied = ($this.CopiedCudaFiles.Count) }  catch {}
+                        try { $detail.Missing = $this.MissingCudaFiles }        catch {}
                     }
                     else {
                         try { $detail.Copied = ($this.CopiedCudnnFiles.Count) } catch {}
-                        try { $detail.Missing = $this.MissingCudnnFiles } catch {}
+                        try { $detail.Missing = $this.MissingCudnnFiles }       catch {}
                     }
 
                     $detail.Success = $true
@@ -1486,22 +1404,21 @@ Class PythonDev {
                 }
             }
 
-            $summary.Success = ($summary.Details | Where-Object { $_.Success -eq $false }).Count -eq 0
+            $summary.Success = ($summary.Details | Where-Object { -not $_.Success }).Count -eq 0
             return $summary
         }
         catch {
-            Write-Error "InstallNvidia failed:  $($_.Exception.Message)"
             $summary.Error = $_.Exception.Message
+            Write-Error "InstallNvidia failed: $($_.Exception.Message)"
             return $summary
         }
     }
 
-
-    [void] CopyNvidia([string]$Component) {
+    [void] CopyNvidia([string] $Component) {
         try {
             if (-not $Component) { Write-Error "Component required"; return }
             $c = $Component.ToLower().Trim()
-            # hardcoded target lists (exact filenames)
+
             if ($c -eq 'cuda') {
                 $targets = @(
                     "cublas64_13.dll", "cublasLt64_13.dll", "cudart64_13.dll", "cufft64_12.dll", "cufftw64_12.dll",
@@ -1511,9 +1428,8 @@ Class PythonDev {
                     "npps64_13.dll", "nvblas64_13.dll", "nvfatbin_130_0.dll", "nvJitLink_130_0.dll", "nvjpeg64_13.dll",
                     "nvrtc-builtins64_130.dll", "nvrtc64_130_0.alt.dll", "nvrtc64_130_0.dll", "nvvm64_40_0.dll"
                 )
-                $dest = $null
-                if ($this.Config -is [hashtable]) { if ($this.Config.ContainsKey('CudaBin')) { $dest = $this.Config['CudaBin'] } }
-                else { if ($this.Config.PSObject.Properties.Match('CudaBin').Count -gt 0) { $dest = $this.Config.CudaBin } }
+                if ($this.Config -is [hashtable]) { $dest = $this.Config['CudaBin'] }
+                else { $dest = $this.Config.CudaBin }
                 if (-not $dest) { Write-Error "Config.CudaBin not set"; return }
             }
             elseif ($c -eq 'cudnn') {
@@ -1522,40 +1438,29 @@ Class PythonDev {
                     "cudnn_engines_runtime_compiled64_9.dll", "cudnn_graph64_9.dll", "cudnn_heuristic64_9.dll",
                     "cudnn_ops64_9.dll", "cudnn64_9.dll"
                 )
-                $dest = $null
-                if ($this.Config -is [hashtable]) { if ($this.Config.ContainsKey('CuDNNBin')) { $dest = $this.Config['CuDNNBin'] } }
-                else { if ($this.Config.PSObject.Properties.Match('CuDNNBin').Count -gt 0) { $dest = $this.Config.CuDNNBin } }
+                if ($this.Config -is [hashtable]) { $dest = $this.Config['CuDNNBin'] }
+                else { $dest = $this.Config.CuDNNBin }
                 if (-not $dest) { Write-Error "Config.CuDNNBin not set"; return }
             }
             else {
                 Write-Error "Unsupported component: $Component"; return
             }
 
-            # Ensure dest exists
             if (-not (Test-Path $dest)) { New-Item -Path $dest -ItemType Directory -Force | Out-Null }
 
-            # Candidate source directories: DLDir\<component>, DLDir, extracted subfolders
-            $dlRoot = $null
-            if ($this.Config -is [hashtable]) { if ($this.Config.ContainsKey('DLDir')) { $dlRoot = $this.Config['DLDir'] } }
-            else { if ($this.Config.PSObject.Properties.Match('DLDir').Count -gt 0) { $dlRoot = $this.Config.DLDir } }
+            # DLDir + subfolders (extract dirs)
+            if ($this.Config -is [hashtable]) { $dlRoot = $this.Config['DLDir'] }
+            else { $dlRoot = $this.Config.DLDir }
             if (-not $dlRoot) { Write-Error "Config.DLDir not set"; return }
 
             $candidates = @()
-            $candidates += (Join-Path $dlRoot $c)
             $candidates += $dlRoot
-
-            # include any extracted subfolders inside dlRoot (first level)
             try {
-                $firstLevel = Get-ChildItem -Path $dlRoot -Directory -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName -ErrorAction SilentlyContinue
-                foreach ($d in $firstLevel) { $candidates += $d }
+                $candidates += Get-ChildItem -Path $dlRoot -Directory -ErrorAction SilentlyContinue |
+                Select-Object -ExpandProperty FullName -ErrorAction SilentlyContinue
             }
             catch {}
 
-            # also include configured runtime bins
-            if ($this -and $this.PSObject.Properties.Match('CudaBin').Count -gt 0 -and $this.CudaBin) { $candidates += $this.CudaBin }
-            if ($this -and $this.PSObject.Properties.Match('CuDNNBin').Count -gt 0 -and $this.CuDNNBin) { $candidates += $this.CuDNNBin }
-
-            # normalize and filter existing
             $candidates = $candidates | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique
 
             $copied = New-Object System.Collections.Generic.List[string]
@@ -1568,12 +1473,14 @@ Class PythonDev {
                     try {
                         $srcFile = Join-Path -Path $srcRoot -ChildPath $t
                         if (Test-Path $srcFile) { $found = $srcFile; break }
-                        # case-insensitive search
-                        $g = Get-ChildItem -Path $srcRoot -Filter $t -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+
+                        $g = Get-ChildItem -Path $srcRoot -Filter $t -Recurse -ErrorAction SilentlyContinue |
+                        Select-Object -First 1
                         if ($g) { $found = $g.FullName; break }
                     }
                     catch {}
                 }
+
                 if ($found) {
                     try {
                         $destFile = Join-Path -Path $dest -ChildPath $t
@@ -1584,11 +1491,12 @@ Class PythonDev {
                         $errors.Add([pscustomobject]@{ File = $t; Error = $_.Exception.Message }) | Out-Null
                     }
                 }
-                else { $missing.Add($t) | Out-Null }
+                else {
+                    $missing.Add($t) | Out-Null
+                }
             }
 
-            # write summaries back to instance
-            $uc = ($c.Substring(0, 1).ToUpper() + $c.Substring(1))
+            $uc = $c.Substring(0, 1).ToUpper() + $c.Substring(1)
             try { $this."Copied${uc}Files" = $copied } catch {}
             try { $this."Missing${uc}Files" = $missing } catch {}
             try { $this."Copy${uc}Errors" = $errors } catch {}
@@ -1599,165 +1507,101 @@ Class PythonDev {
             Write-Error "CopyNvidia failed: $($_.Exception.Message)"
         }
     }
+
     # Helper: prepend only unique, existing paths to session PATH
     [void] PrependUniquePathItems([string[]] $Items) {
         if (-not $env:Path) { $env:Path = '' }
-        $sessionItems = ($env:Path -split ';' | Where-Object { $_ -ne '' })
+
+        # Normalize PATH ปัจจุบันก่อน
+        $sessionItems = @()
+        foreach ($p in ($env:Path -split ';')) {
+            $p = $p.Trim()
+            if (-not $p) { continue }
+            try {
+                if (Test-Path -LiteralPath $p) {
+                    $full = (Get-Item -LiteralPath $p -ErrorAction Stop).FullName.TrimEnd('\')
+                }
+                else {
+                    $full = $p.TrimEnd('\')
+                }
+            }
+            catch {
+                $full = $p.TrimEnd('\')
+            }
+            if ($sessionItems -notcontains $full) {
+                $sessionItems += $full
+            }
+        }
 
         $toPrepend = New-Object System.Collections.Generic.List[string]
 
         foreach ($item in $Items) {
             if (-not $item) { continue }
-            # normalize path: resolve relative -> absolute if possible
             $resolved = $null
             try {
-                if (Test-Path $item) { $resolved = (Get-Item $item).FullName.TrimEnd('\') }
-                else { $resolved = $item } # keep as-is (may be fixed later)
+                if (Test-Path -LiteralPath $item) {
+                    $resolved = (Get-Item -LiteralPath $item).FullName.TrimEnd('\')
+                }
+                else {
+                    $resolved = $item.Trim()
+                }
             }
             catch {
-                $resolved = $item
+                $resolved = $item.Trim()
             }
 
-            if ($resolved -and (Test-Path $resolved)) {
+            if ($resolved -and (Test-Path -LiteralPath $resolved)) {
                 $exists = $false
                 foreach ($si in $sessionItems) {
                     if ($si -ieq $resolved) { $exists = $true; break }
                 }
-                if (-not $exists) { $null = $toPrepend.Add($resolved) }
+                if (-not $exists) {
+                    $null = $toPrepend.Add($resolved)
+                    $sessionItems += $resolved
+                }
             }
         }
 
         if ($toPrepend.Count -gt 0) {
-            $newSession = ($toPrepend + $sessionItems) -join ';'
-            $env:Path = $newSession
+            $env:Path = ($toPrepend + $sessionItems) -join ';'
             Write-Host "Prepended $($toPrepend.Count) PATH entries to session PATH."
         }
         else {
             Write-Host "No new PATH entries were added (all present or not found)." -ForegroundColor Yellow
         }
     }
-
-    # Setup PATH and aliases for current session. If $Persist = $true, persist to User PATH.
-    [void] SetupPath([bool]$Persist = $false) {
-        # prefer config.RootDir or AbsRoot if present
-        $cfg = $this.Config
-        $root = $null
-        if ($cfg) {
-            if ($cfg -is [hashtable]) {
-                if ($cfg.ContainsKey('RootDir') -and $cfg['RootDir']) { $root = $cfg['RootDir'] }
-            }
-            else {
-                if ($cfg.PSObject.Properties.Match('RootDir').Count -gt 0 -and $cfg.RootDir) { $root = $cfg.RootDir }
-            }
-        }
-        if (-not $root -and $this.PSObject.Properties.Match('AbsRoot').Count -gt 0 -and $this.AbsRoot) { $root = $this.AbsRoot }
-        if (-not $root) { Write-Host "SetupPath: RootDir/AbsRoot not set; abort." -ForegroundColor Red; return }
-
-        # Helper to resolve config path (if relative, make absolute under $root)
-        function ResolveCfgPath([string] $p) {
-            if (-not $p) { return $null }
-            try {
-                if (Test-Path $p) { return (Get-Item $p).FullName.TrimEnd('\') }
-                # attempt relative to root
-                $maybe = Join-Path $root $p
-                if (Test-Path $maybe) { return (Get-Item $maybe).FullName.TrimEnd('\') }
-            }
-            catch {}
-            return $p
-        }
-
-        # Build candidate directories (strings guaranteed by SetConfig ideally)
-        $candidates = @()
-        $py = ResolveCfgPath(($cfg -is [hashtable] ? $cfg['PyDir'] : $cfg.PyDir))
-        if ($py) {
-            $candidates += $py
-            $candidates += (Join-Path $py 'Scripts')
-        }
-        $cudaBin = ResolveCfgPath(($cfg -is [hashtable] ? $cfg['CudaBin'] : $cfg.CudaBin))
-        $cuDNNBin = ResolveCfgPath(($cfg -is [hashtable] ? $cfg['CuDNNBin'] : $cfg.CuDNNBin))
-        if ($cudaBin) { $candidates += $cudaBin }
-        if ($cuDNNBin) { $candidates += $cuDNNBin }
-
-        $pgit = ResolveCfgPath(($cfg -is [hashtable] ? $cfg['PGit'] : $cfg.PGit))
-        if ($pgit) {
-            $candidates += (Join-Path $pgit 'cmd')
-            $candidates += (Join-Path $pgit 'bin')
-            $candidates += (Join-Path $pgit 'mingw64\bin')
-        }
-
-        # Collect existing directories (normalized)
-        $existing = New-Object System.Collections.Generic.List[string]
-        foreach ($p in $candidates) {
-            if ($p -and (Test-Path $p)) {
-                try { $full = (Get-Item $p).FullName.TrimEnd('\') } catch { $full = $p }
-                if (-not ($existing -contains $full)) { $null = $existing.Add($full) }
-            }
-        }
-
-        if ($existing.Count -eq 0) {
-            Write-Host "SetupPath: No candidate directories exist under $root. Nothing changed." -ForegroundColor Yellow
-        }
-        else {
-            # Prepend to session PATH (unique)
-            $this.PrependUniquePathItems($existing)
-            Write-Host "SetupPath: Prepend $($existing.Count) directories to session PATH:" -ForegroundColor Cyan
-            foreach ($e in $existing) { Write-Host "  + $e" }
-        }
-
-        # Detect executables now that env:Path is updated
-        $detected = $this.DetectExecutables($existing)
-
-        # Create session-only functions/aliases for python/pip/git
-        try { $this.CreateSessionAliases($detected) } catch {}
-
-        # Optionally persist to User PATH
-        if ($Persist -and $existing.Count -gt 0) {
-            try {
-                $currentUserPath = [Environment]::GetEnvironmentVariable('Path', 'User') -or ''
-                $userItems = ($currentUserPath -split ';' | Where-Object { $_ -ne '' })
-                $toPrepend = New-Object System.Collections.Generic.List[string]
-                foreach ($e in $existing) {
-                    $found = $false
-                    foreach ($ui in $userItems) { if ($ui -ieq $e) { $found = $true; break } }
-                    if (-not $found) { $null = $toPrepend.Add($e) }
-                }
-                if ($toPrepend.Count -gt 0) {
-                    $newUserPath = ($toPrepend + $userItems) -join ';'
-                    [Environment]::SetEnvironmentVariable('Path', $newUserPath, 'User')
-                    Write-Host "SetupPath: Persisted $($toPrepend.Count) entries to User PATH." -ForegroundColor Green
-                }
-                else {
-                    Write-Host "SetupPath: No new entries to persist to User PATH." -ForegroundColor Green
-                }
-            }
-            catch {
-                Write-Host "SetupPath: Failed to persist PATH to User: $($_.Exception.Message)" -ForegroundColor Red
-            }
-        }
-
-        # Print quick checks (session)
-        Write-Host "`nQuick checks (session):" -ForegroundColor Green
-        try { & python --version } catch { Write-Host "  python: (not available or redirected to Store)"; }
-        try { & python -m pip --version } catch { Write-Host "  pip: (not available)"; }
-        try { & git --version } catch { Write-Host "  git: (not available)"; }
-    }
-
     # Detect executables. Accept existing dirs list (optional) to prefer local ones.
     [hashtable] DetectExecutables([string[]]$existingDirs) {
         $result = @{
             python                  = $null
             pip                     = $null
             git                     = $null
+            ffmpeg                  = $null
             pip_using_python_module = $false
         }
 
-        # Helper: prefer existingDirs (normalized) when searching
         $existing = @()
         if ($existingDirs) {
-            foreach ($d in $existingDirs) { if ($d -and (Test-Path $d)) { $existing += (Get-Item $d).FullName.TrimEnd('\') } }
+            foreach ($d in $existingDirs) {
+                if ($d -and (Test-Path -LiteralPath $d)) {
+                    $existing += (Get-Item -LiteralPath $d).FullName.TrimEnd('\')
+                }
+            }
         }
 
-        # 1) Prefer Get-Command (system aware)
+        # Helper เล็ก ๆ
+        function Get-ConfigValueLocal([object]$cfgRef, [string]$key) {
+            if (-not $cfgRef) { return $null }
+            if ($cfgRef -is [hashtable]) {
+                if ($cfgRef.ContainsKey($key)) { return $cfgRef[$key] }
+            }
+            else {
+                if ($cfgRef.PSObject.Properties.Match($key).Count -gt 0) { return $cfgRef.$key }
+            }
+            return $null
+        }
+
+        # --- python: Get-Command ก่อน ---
         foreach ($name in @('python', 'python3')) {
             try {
                 $cmd = Get-Command $name -ErrorAction Stop
@@ -1766,96 +1610,156 @@ Class PythonDev {
             catch {}
         }
 
-        # 2) fallback to local pyDir python.exe if present (prefer existingDirs)
+        # fallback: หา python.exe ใน existingDirs หรือ Config.PyDir
         if (-not $result.python) {
             $candPaths = @()
-            if ($existing.Count -gt 0) { foreach ($e in $existing) { $candPaths += (Join-Path $e 'python.exe') } }
-            # also check configured PyDir
+            if ($existing.Count -gt 0) {
+                foreach ($e in $existing) { $candPaths += (Join-Path $e 'python.exe') }
+            }
             try {
-                $py = $null
-                if ($this.Config -is [hashtable]) { if ($this.Config.ContainsKey('PyDir')) { $py = $this.Config['PyDir'] } }
-                else { if ($this.Config.PSObject.Properties.Match('PyDir').Count -gt 0) { $py = $this.Config.PyDir } }
+                $py = Get-ConfigValueLocal $this.Config 'PyDir'
                 if ($py) { $candPaths += (Join-Path $py 'python.exe') }
             }
             catch {}
             foreach ($cand in $candPaths) {
-                if (Test-Path $cand) { $result.python = (Get-Item $cand).FullName; break }
+                if (Test-Path -LiteralPath $cand) {
+                    $result.python = (Get-Item -LiteralPath $cand).FullName
+                    break
+                }
             }
         }
 
-        # 3) pip: prefer pip executable in Scripts or system pip, else python -m pip
+        # --- pip ---
         try {
             $cmdpip = Get-Command pip -ErrorAction Stop
             if ($cmdpip -and $cmdpip.Path) { $result.pip = $cmdpip.Path }
         }
         catch {}
+
         if (-not $result.pip) {
             $pCandidates = @()
-            if ($existing.Count -gt 0) { foreach ($e in $existing) { $pCandidates += (Join-Path $e 'Scripts\pip.exe'); $pCandidates += (Join-Path $e 'Scripts\pip3.exe') } }
+            if ($existing.Count -gt 0) {
+                foreach ($e in $existing) {
+                    $pCandidates += (Join-Path $e 'Scripts\pip.exe')
+                    $pCandidates += (Join-Path $e 'Scripts\pip3.exe')
+                }
+            }
             try {
-                $py = $null
-                if ($this.Config -is [hashtable]) { if ($this.Config.ContainsKey('PyDir')) { $py = $this.Config['PyDir'] } }
-                else { if ($this.Config.PSObject.Properties.Match('PyDir').Count -gt 0) { $py = $this.Config.PyDir } }
-                if ($py) { $pCandidates += (Join-Path $py 'Scripts\pip.exe'); $pCandidates += (Join-Path $py 'Scripts\pip3.exe') }
+                $py = Get-ConfigValueLocal $this.Config 'PyDir'
+                if ($py) {
+                    $pCandidates += (Join-Path $py 'Scripts\pip.exe')
+                    $pCandidates += (Join-Path $py 'Scripts\pip3.exe')
+                }
             }
             catch {}
             foreach ($pc in $pCandidates) {
-                if (Test-Path $pc) { $result.pip = (Get-Item $pc).FullName; break }
+                if (Test-Path -LiteralPath $pc) {
+                    $result.pip = (Get-Item -LiteralPath $pc).FullName
+                    break
+                }
             }
-            if (-not $result.pip -and $result.python) { $result.pip_using_python_module = $true }
+            if (-not $result.pip -and $result.python) {
+                $result.pip_using_python_module = $true
+            }
         }
 
-        # 4) git: Get-Command, then PGit candidates, then recursive search fallback
+        # --- git ---
         try {
             $cmdgit = Get-Command git -ErrorAction Stop
             if ($cmdgit -and $cmdgit.Path) { $result.git = $cmdgit.Path }
         }
         catch {
-            # try portable git configured path
             try {
-                $pg = $null
-                if ($this.Config -is [hashtable]) { if ($this.Config.ContainsKey('PGit')) { $pg = $this.Config['PGit'] } }
-                else { if ($this.Config.PSObject.Properties.Match('PGit').Count -gt 0) { $pg = $this.Config.PGit } }
+                $pg = Get-ConfigValueLocal $this.Config 'PGit'
                 if ($pg) {
                     $cands = @(
                         Join-Path $pg 'cmd\git.exe',
                         Join-Path $pg 'bin\git.exe',
                         Join-Path $pg 'mingw64\bin\git.exe'
                     )
-                    foreach ($g in $cands) { if (Test-Path $g) { $result.git = (Get-Item $g).FullName; break } }
+                    foreach ($g in $cands) {
+                        if (Test-Path -LiteralPath $g) {
+                            $result.git = (Get-Item -LiteralPath $g).FullName
+                            break
+                        }
+                    }
                 }
             }
             catch {}
 
-            # last-resort: search under python_embeded tree if nothing found
+            # last resort: search under python_embeded tree
             try {
-                $root = $null
-                if ($this.Config -is [hashtable]) { if ($this.Config.ContainsKey('RootDir')) { $root = $this.Config['RootDir'] } }
-                else { if ($this.Config.PSObject.Properties.Match('RootDir').Count -gt 0) { $root = $this.Config.RootDir } }
+                $root = Get-ConfigValueLocal $this.Config 'RootDir'
                 if (-not $root -and $this.PSObject.Properties.Match('AbsRoot').Count -gt 0) { $root = $this.AbsRoot }
                 if ($root) {
                     $pe = Join-Path $root 'python_embeded'
-                    if (Test-Path $pe) {
-                        $found = Get-ChildItem -Path $pe -Recurse -Filter 'git.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
-                        if ($found) { $result.git = $found.FullName }
+                    if (Test-Path -LiteralPath $pe) {
+                        $foundGit = Get-ChildItem -Path $pe -Recurse -Filter 'git.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+                        if ($foundGit) { $result.git = $foundGit.FullName }
                     }
                 }
             }
             catch {}
         }
 
+        # --- ffmpeg ---
+        try {
+            $cmdff = Get-Command ffmpeg -ErrorAction Stop
+            if ($cmdff -and $cmdff.Path) { $result.ffmpeg = $cmdff.Path }
+        }
+        catch {}
+
+        if (-not $result.ffmpeg) {
+            $ffRoot = Get-ConfigValueLocal $this.Config 'FFmpeg'
+            $ffCandidates = @()
+            if ($ffRoot) {
+                $ffCandidates += (Join-Path $ffRoot 'bin\ffmpeg.exe')
+                $ffCandidates += (Join-Path $ffRoot 'ffmpeg.exe')
+            }
+            if ($existing.Count -gt 0) {
+                foreach ($e in $existing) {
+                    $ffCandidates += (Join-Path $e 'ffmpeg.exe')
+                }
+            }
+            foreach ($fc in $ffCandidates) {
+                if (Test-Path -LiteralPath $fc) {
+                    $result.ffmpeg = (Get-Item -LiteralPath $fc).FullName
+                    break
+                }
+            }
+        }
+
         return $result
     }
+
+ 
     # Create session-only function aliases pointing to resolved executables
     [void] CreateSessionAliases([hashtable]$detected) {
+
         function _MakeFunction($name, $exePath, [bool]$usePythonModule = $false) {
             if (-not $exePath) { return }
+
             if ($usePythonModule) {
-                $sb = "param([Parameter(ValueFromRemainingArguments=`$true)] `$Args) & `"$exePath`" -m pip @Args"
+                # ใช้ python -m pip
+                $sb = @"
+param(
+    [Parameter(ValueFromRemainingArguments=`$true)]
+    [object[]] `$Args
+)
+& "$exePath" -m pip @Args
+"@
             }
             else {
-                $sb = "param([Parameter(ValueFromRemainingArguments=`$true)] `$Args) & `"$exePath`" @Args"
+                # เรียก exe ตรง ๆ
+                $sb = @"
+param(
+    [Parameter(ValueFromRemainingArguments=`$true)]
+    [object[]] `$Args
+)
+& "$exePath" @Args
+"@
             }
+
             try {
                 Set-Item -Path ("Function:\" + $name) -Value ([ScriptBlock]::Create($sb)) -Force
                 Write-Host "Alias/function '$name' -> $exePath (session only)"
@@ -1870,103 +1774,437 @@ Class PythonDev {
         else { Write-Host "python not found via detection." -ForegroundColor Yellow }
 
         # pip
-        if ($detected.pip) { _MakeFunction 'pip' $detected.pip }
-        elseif ($detected.pip_using_python_module -and $detected.python) { _MakeFunction 'pip' $detected.python $true }
-        else { Write-Host "pip not available." -ForegroundColor Yellow }
+        if ($detected.pip) {
+            _MakeFunction 'pip' $detected.pip
+        }
+        elseif ($detected.pip_using_python_module -and $detected.python) {
+            _MakeFunction 'pip' $detected.python $true
+        }
+        else {
+            Write-Host "pip not available." -ForegroundColor Yellow
+        }
 
         # git
         if ($detected.git) { _MakeFunction 'git' $detected.git }
         else { Write-Host "git not found." -ForegroundColor Yellow }
-    }
-    
-    # เมทอดสำหรับติดตั้งตาม flow ที่ต้องการ
-    [void] InstallFlow([bool] $WhatIf = $false, [bool] $AutoRemove = $false, [bool] $BackupExisting = $true) {
-        # 1) show menu (interactive) -> returns version string or $null
-        $version = $this.ShowPythonVersionsMenu()
-        if (-not $version) { Write-Host "No version selected. Aborting." -ForegroundColor Yellow; return }
 
-        Write-Host "Selected version: $version" -ForegroundColor DarkGray
-
-        # 2) check existing python (interactive prompt inside CheckPython will ask unless $AutoRemove = $true)
-        $ok = $this.CheckPython($version, $AutoRemove, $BackupExisting, $WhatIf)
-        if (-not $ok) { Write-Host "CheckPython declined or failed. Aborting." -ForegroundColor Yellow; return }
-
-        # 3) download + copy
-        # $downloadOk = $this.DownloadAndCopyPython($version, $false, $false, $false)
-        $downloadOk = $this.DownloadAndCopyPython($version, $WhatIf, $false, $BackupExisting)
-        if (-not $downloadOk) { Write-Warning "DownloadAndCopyPython failed. Aborting."; return }
-
-        # 4) get pip
-        $pipOk = $this.GetPip($false)
-        if (-not $pipOk) { Write-Warning "GetPip failed. Please run manually."; return }
-
-        Write-Host "Installation complete: $version" -ForegroundColor Green
-
-        $GitOk = $this.InstallPGit()
-        if (-not $GitOk) { Write-Warning "Get Git failed. Please run manually."; return }
-
-         
-        $NvidiaOk = $this.InstallNvidia('All')
-
-        if (-not $NvidiaOk) { Write-Warning "Instal lNvidia Cuda and Cudnn failed. Please run manually."; return }
-
-        $this.SetupPath($true)
+        # ffmpeg
+        if ($detected.ffmpeg) { _MakeFunction 'ffmpeg' $detected.ffmpeg }
+        else { Write-Host "ffmpeg not found." -ForegroundColor Yellow }
     }
 
    
 
-    
-    [void] Run() {
-        Write-Host "RUN DEMO" 
-        # if (-not $this.IsFolder()) {
-        #     Write-Host "One or more folders are missing. Creating folders (Skip mode)..." -ForegroundColor Yellow
-        #     # CreateFolders() default overload will create (Skip existing)
-        #     $this.CreateFolders()
-        # }
-        # else { Write-Host "All folders exist. Nothing to do." -ForegroundColor Green }
-         
-        # $res = $this.TestPythonGlobal($true)
-        # $fmt = $res | Format-List * | Out-String
-        # Write-Host $fmt
-        $this.InstallPGit($true)
-        # Write-Host $this.GetNvTool('cuda')
-        # Write-Host $this.GetNvTool('cunvv')
-        $this.InstallNvidia('All')
-        $this.SetupPath($true)
+    <#
+        .SYNOPSIS
+            ตั้งค่า PATH ให้พร้อมใช้งาน Python/pip/Git/FFmpeg/CUDA/cuDNN จาก config ปัจจุบัน
+
+        .DESCRIPTION
+            ทำหน้าที่:
+              1) อ่านค่าโฟลเดอร์จาก $this.Config (RootDir, PyDir, PGit, FFmpeg, CudaBin, CuDNNBin)
+              2) สร้างลิสต์โฟลเดอร์ที่ต้องการเพิ่มลง PATH (เช่น python_embeded, driver\PortableGit\cmd, driver\ffmpeg\bin ฯลฯ)
+              3) ตรวจว่ามีอยู่จริงแล้วค่อยเพิ่ม (ลดโอกาส PATH เน่า)
+              4) เพิ่มลง PATH ของ session ปัจจุบัน (เฉพาะถ้ายังไม่มี)
+              5) ถ้า $Persist เป็น $true จะ prepend ลง User PATH ด้วย (เซสชันใหม่ก็เห็น)
+              6) ตรวจหา executables จริงจาก PATH (python, pip, git, ffmpeg, nvcc ฯลฯ)
+              7) สร้างฟังก์ชัน/alias ใน session ให้เรียกใช้เครื่องมือเหล่านี้ได้สะดวก
+
+        .PARAMETER Persist
+            - $false : แก้เฉพาะ PATH ของ session ปัจจุบัน (ปิด PowerShell แล้วค่า PATH เดิมกลับมา)
+            - $true  : แก้ทั้ง session ปัจจุบัน + บันทึกลง User PATH (เซสชันใหม่ก็เห็นเหมือนกัน)
+
+        .NOTES
+            - ควรเรียกหลังจาก InstallFlow() ติดตั้งทุกอย่างเรียบร้อยแล้ว
+            - ถ้าเปิด PowerShell ใหม่ (session ใหม่) และติดตั้งทุกอย่างเสร็จแล้ว
+              ให้เรียกเฉพาะ SetupPath($true) ก็เพียงพอ ไม่ต้อง InstallFlow() ซ้ำ
+    #>
+
+    # Setup PATH and aliases for current session. If $Persist = $true, persist to User PATH.
+    [void] SetupPath([bool]$Persist = $false) {
+        $cfg = $this.Config
+        $root = $null
+
+        # Helper: อ่านค่า config ทั้งแบบ hashtable และ object
+        function Get-ConfigValue([object]$cfgRef, [string]$key) {
+            if (-not $cfgRef) { return $null }
+            if ($cfgRef -is [hashtable]) {
+                if ($cfgRef.ContainsKey($key)) { return $cfgRef[$key] }
+            }
+            else {
+                if ($cfgRef.PSObject.Properties.Match($key).Count -gt 0) { return $cfgRef.$key }
+            }
+            return $null
+        }
+
+        if ($cfg) {
+            $root = Get-ConfigValue $cfg 'RootDir'
+        }
+        if (-not $root -and $this.PSObject.Properties.Match('AbsRoot').Count -gt 0 -and $this.AbsRoot) {
+            $root = $this.AbsRoot
+        }
+        if (-not $root) {
+            Write-Host "SetupPath: RootDir/AbsRoot not set; abort." -ForegroundColor Red
+            return
+        }
+
+        # Helper: resolve config path (absolute under $root if relative)
+        function ResolveCfgPath([string] $p) {
+            if (-not $p) { return $null }
+            try {
+                if (Test-Path -LiteralPath $p) {
+                    return (Get-Item -LiteralPath $p).FullName.TrimEnd('\')
+                }
+                $maybe = Join-Path $root $p
+                if (Test-Path -LiteralPath $maybe) {
+                    return (Get-Item -LiteralPath $maybe).FullName.TrimEnd('\')
+                }
+            }
+            catch {}
+            return $p
+        }
+
+        # --- Build candidate directories ---
+
+        $candidates = @()
+
+        # Python + Scripts
+        $py = ResolveCfgPath( (Get-ConfigValue $cfg 'PyDir') )
+        if ($py) {
+            $candidates += $py
+            $candidates += (Join-Path $py 'Scripts')
+        }
+
+        # CUDA / cuDNN bin
+        $cudaBin = ResolveCfgPath( (Get-ConfigValue $cfg 'CudaBin') )
+        $cuDNNBin = ResolveCfgPath( (Get-ConfigValue $cfg 'CuDNNBin') )
+        if ($cudaBin) { $candidates += $cudaBin }
+        if ($cuDNNBin) { $candidates += $cuDNNBin }
+
+        # PortableGit
+        $pgit = ResolveCfgPath( (Get-ConfigValue $cfg 'PGit') )
+        if ($pgit) {
+            $candidates += (Join-Path $pgit 'cmd')
+            $candidates += (Join-Path $pgit 'bin')
+            $candidates += (Join-Path $pgit 'mingw64\bin')
+        }
+
+        # FFmpeg: เดาว่า Config.FFmpeg ชี้ไป root ของ FFmpeg (เช่น โฟลเดอร์ที่มี bin\ffmpeg.exe)
+        $ffmpegRoot = ResolveCfgPath( (Get-ConfigValue $cfg 'FFmpeg') )
+        if ($ffmpegRoot) {
+            $ffBin1 = Join-Path $ffmpegRoot 'bin'
+            if (Test-Path (Join-Path $ffBin1 'ffmpeg.exe')) {
+                $candidates += $ffBin1
+            }
+            elseif (Test-Path (Join-Path $ffmpegRoot 'ffmpeg.exe')) {
+                $candidates += $ffmpegRoot
+            }
+            else {
+                # ไม่รู้ structure แน่ชัด ใส่ root ไปก่อน
+                $candidates += $ffmpegRoot
+            }
+        }
+
+        # เก็บเฉพาะที่มีอยู่จริง
+        $existing = New-Object System.Collections.Generic.List[string]
+        foreach ($p in $candidates) {
+            if ($p -and (Test-Path -LiteralPath $p)) {
+                try { $full = (Get-Item -LiteralPath $p).FullName.TrimEnd('\') } catch { $full = $p }
+                if (-not ($existing -contains $full)) { $null = $existing.Add($full) }
+            }
+        }
+
+        if ($existing.Count -eq 0) {
+            Write-Host "SetupPath: No candidate directories exist under $root. Nothing changed." -ForegroundColor Yellow
+        }
+        else {
+            # Prepend to session PATH (unique)
+            $this.PrependUniquePathItems($existing.ToArray())
+            Write-Host "SetupPath: Prepend $($existing.Count) directories to session PATH:" -ForegroundColor Cyan
+            foreach ($e in $existing) { Write-Host "  + $e" }
+        }
+
+        # ตรวจ executables จาก PATH ที่เราเพิ่งเติม
+        $detected = $this.DetectExecutables($existing.ToArray())
+
+        # Create session-only functions/aliases สำหรับ python/pip/git/ffmpeg
+        try { $this.CreateSessionAliases($detected) } catch {}
+
+        # Persist to User PATH ถ้าขอ
+        if ($Persist -and $existing.Count -gt 0) {
+            try {
+                $currentUserPath = [Environment]::GetEnvironmentVariable('Path', 'User') -or ''
+                $userItems = ($currentUserPath -split ';' | Where-Object { $_ -ne '' })
+                $toPrependUser = New-Object System.Collections.Generic.List[string]
+                foreach ($e in $existing) {
+                    $found = $false
+                    foreach ($ui in $userItems) {
+                        if ($ui -ieq $e) { $found = $true; break }
+                    }
+                    if (-not $found) { $null = $toPrependUser.Add($e) }
+                }
+                if ($toPrependUser.Count -gt 0) {
+                    $newUserPath = ($toPrependUser + $userItems) -join ';'
+                    [Environment]::SetEnvironmentVariable('Path', $newUserPath, 'User')
+                    Write-Host "SetupPath: Persisted $($toPrependUser.Count) entries to User PATH." -ForegroundColor Green
+                }
+                else {
+                    Write-Host "SetupPath: No new entries to persist to User PATH." -ForegroundColor Green
+                }
+            }
+            catch {
+                Write-Host "SetupPath: Failed to persist PATH to User: $($_.Exception.Message)" -ForegroundColor Red
+            }
+        }
+
+        # Quick checks (session)
+        Write-Host "`nQuick checks (session):" -ForegroundColor Green
+        try { & python --version }            catch { Write-Host "  python: (not available or redirected)" }
+        try { & python -m pip --version }     catch { Write-Host "  pip: (not available)" }
+        try { & git --version }               catch { Write-Host "  git: (not available)" }
+        try { & ffmpeg -version | Select-String -Pattern '^ffmpeg' -SimpleMatch } catch { Write-Host "  ffmpeg: (not available)" }
     }
+
+
+    <#
+        .SYNOPSIS
+            One-shot installer สำหรับ Python embed + pip + PortableGit + FFmpeg + NVIDIA CUDA/cuDNN
+
+        .DESCRIPTION
+            รันทีเดียวแล้วจัดการทุกอย่างตามลำดับ:
+              1) ตรวจสอบโครงสร้างโฟลเดอร์ (RootDir, DLDir, PyDir, driver\*)
+              2) ดาวน์โหลด + แตกไฟล์ Python embeddable ตามเวอร์ชันที่ระบุ
+              3) ติดตั้ง pip ลง Python embeddable
+              4) ติดตั้ง PortableGit แบบ portable ไปยัง driver\PortableGit
+              5) ติดตั้ง FFmpeg ไปยัง driver\ffmpeg
+              6) ติดตั้ง NVIDIA runtime (CUDA + cuDNN) ผ่าน InstallNvidia("all")
+              7) เรียก SetupPath($true) เพื่ออัปเดต PATH (session + User)
+              8) เคลียร์โฟลเดอร์ดาวน์โหลด (DLDir) เพื่อล้าง cache
+
+        .PARAMETER version
+            เวอร์ชัน Python (เช่น "3.12.10") ต้องตรงกับรูปแบบที่ GetPythonVersions() คืนค่า
+
+        .NOTES
+            - ต้องมี NVIDIA GPU และไดรเวอร์เวอร์ชันที่รองรับ CUDA 13.x ขึ้นไป
+            -  เมธอดต่อไปนี้มีอยู่ใน class:
+                * IsFolder()
+                * CreateFolders()
+                * DownloadAndCopyPython()
+                * GetPip()
+                * InstallPGit()
+                * InstallFFmpeg()
+                * InstallNvidia()
+                * SetupPath()
+                * RemoveFolder()
+    #>
+    
+    [void] InstallFlow() {
+        $version = $this.ShowPythonVersionsMenu()
+        Write-Host "Select Python Version $version"
+        $this.InstallFlow($version)
+         
+    }
+    [void] InstallFlow([string] $version) {
+        if (-not $version -or [string]::IsNullOrWhiteSpace($version)) {
+            throw [System.ArgumentException]::new("InstallFlow: version is null or empty.")
+        }
+
+        if (-not $this.Config) {
+            throw "InstallFlow: Config is not initialized. Make sure constructor / SetPath() has been called."
+        }
+
+        Write-Host ""
+        Write-Host "=== InstallFlow :: Python $version ===" -ForegroundColor Cyan
+
+        # 1) Ensure folder structure exists
+        try {
+            if (-not $this.IsFolder()) {
+                Write-Host "InstallFlow: Folder structure missing. Creating folders (skip existing)..." -ForegroundColor Yellow
+                $this.CreateFolders()
+            }
+            else {
+                Write-Host "InstallFlow: Folder structure OK." -ForegroundColor DarkGray
+            }
+        }
+        catch {
+            Write-Warning "InstallFlow: Failed while checking/creating folders. $_"
+            return
+        }
+
+        # 2) Download & install Python embeddable
+        Write-Host "InstallFlow: Downloading + installing Python $version (embeddable)..." -ForegroundColor Cyan
+        $downloadOk = $false
+        try {
+            $downloadOk = $this.DownloadAndCopyPython($version, $false, $true, $false)
+        }
+        catch {
+            Write-Warning "InstallFlow: DownloadAndCopyPython($version) threw an exception: $_"
+            $downloadOk = $false
+        }
+
+        if (-not $downloadOk) {
+            Write-Warning "InstallFlow: DownloadAndCopyPython($version) failed. Aborting flow."
+            return
+        }
+        Write-Host "InstallFlow: Python $version installed successfully." -ForegroundColor Green
+
+        # 3) Install pip
+        Write-Host "InstallFlow: Installing pip into embedded Python..." -ForegroundColor Cyan
+        $pipOk = $false
+        try {
+            $pipOk = $this.GetPip()
+        }
+        catch {
+            Write-Warning "InstallFlow: GetPip() threw an exception: $_"
+            $pipOk = $false
+        }
+
+        if (-not $pipOk) {
+            Write-Warning "InstallFlow: GetPip() failed. You may need to install pip manually."
+        }
+        else {
+            Write-Host "InstallFlow: pip installed successfully." -ForegroundColor Green
+        }
+
+        # 4) Install PortableGit
+        Write-Host "InstallFlow: Installing PortableGit..." -ForegroundColor Cyan
+        $gitOk = $false
+        try {
+            $gitOk = $this.InstallPGit($false)
+        }
+        catch {
+            Write-Warning "InstallFlow: InstallPGit() threw an exception: $_"
+            $gitOk = $false
+        }
+
+        if (-not $gitOk) {
+            Write-Warning "InstallFlow: InstallPGit() failed. Git may not be available on PATH."
+        }
+        else {
+            Write-Host "InstallFlow: PortableGit installed successfully." -ForegroundColor Green
+        }
+
+        # 5) Install FFmpeg
+        Write-Host "InstallFlow: Installing FFmpeg..." -ForegroundColor Cyan
+        $ffmpegOk = $false
+        try {
+            $ffmpegOk = $this.InstallFFmpeg($false)
+        }
+        catch {
+            Write-Warning "InstallFlow: InstallFFmpeg() threw an exception: $_"
+            $ffmpegOk = $false
+        }
+
+        if (-not $ffmpegOk) {
+            Write-Warning "InstallFlow: InstallFFmpeg() failed. FFmpeg may not be available on PATH."
+        }
+        else {
+            Write-Host "InstallFlow: FFmpeg installed successfully." -ForegroundColor Green
+        }
+
+        # 6) Install NVIDIA runtime (CUDA + cuDNN)
+        Write-Host "InstallFlow: Installing NVIDIA components (CUDA + cuDNN)..." -ForegroundColor Cyan
+        $nvSummary = $null
+        try {
+            $nvSummary = $this.InstallNvidia("all")
+        }
+        catch {
+            Write-Warning "InstallFlow: InstallNvidia('all') threw an exception: $_"
+            $nvSummary = $null
+        }
+
+        if ($nvSummary -and $nvSummary.PSObject.Properties.Match('Success').Count -gt 0) {
+            if ($nvSummary.Success) {
+                Write-Host "InstallFlow: NVIDIA components installed successfully." -ForegroundColor Green
+            }
+            else {
+                Write-Warning "InstallFlow: InstallNvidia reported failure."
+                if ($nvSummary.PSObject.Properties.Match('Error').Count -gt 0 -and $nvSummary.Error) {
+                    Write-Warning "InstallFlow: InstallNvidia error: $($nvSummary.Error)"
+                }
+            }
+        }
+        else {
+            Write-Host "InstallFlow: InstallNvidia('all') executed (no summary object returned)." -ForegroundColor Yellow
+        }
+
+        # 7) Setup PATH (session + persist user) ตาม config (PyDir, PGit, FFmpeg, CudaBin, CuDNNBin)
+        Write-Host "InstallFlow: Updating PATH (session + user)..." -ForegroundColor Cyan
+        try {
+            $this.SetupPath($true)
+        }
+        catch {
+            Write-Warning "InstallFlow: SetupPath($true) threw an exception: $_"
+        }
+
+        # 8) Cleanup download/cache folder (DLDir)
+        Write-Host "InstallFlow: Cleaning up download/cache folder (DLDir)..." -ForegroundColor Cyan
+        try {
+            $this.RemoveFolder("DLDir")
+        }
+        catch {
+            Write-Warning "InstallFlow: RemoveFolder('DLDir') threw an exception: $_"
+        }
+
+        Write-Host "=== InstallFlow :: Completed (Python $version) ===" -ForegroundColor Green
+    }
+
     
 }
 
-# ------------- USAGE -------------
-# [PythonDev]::new().Run()
-#[PythonDev]::new().InstallFlow($false, $false, $false) 
-# $mgr = [PythonDev]::new()
-# $res = $mgr.TestPythonGlobal($false)
-# $res | Format-List *
-# $pd = [PythonDev]::new('C:\AI-Driver\Custamer-dev\TEST')   # ตัวอย่าง ถ้าคลาสชื่อ PythonDev
-# # หรือเรียก SetPath ถ้าคลาสมีเมธอดนั้น
-# $pd.SetPath('C:\AI-Driver\Custamer-dev\TEST')
-
-# # ตรวจสอบ GetCacheBase และ GetPGit
-# $pd.GetCacheBase()
-# $urlOrLocal = $pd.GetPGit()
-# Write-Host "GetPGit => $urlOrLocal"
-# $pd.Config.GetType().FullName
-# # เรียก InstallPGit (จะดาวน์โหลด/แตก ถาจำเป็น)
-# $r = $pd.InstallPGit()
-# $r | Format-List *
-# All install python + pip + cuda 13.0 + cudnn 
-# [PythonDev]::new().InstallFlow($false, $false, $false) 
-#ls version Python
-
-# $data = [PythonDev]::new()
-# $version = "3.12.10"
-# $data.DownloadAndCopyPython($version, $false, $false, $false)
-# $data.GetPip($false)
-# $data.InstallPGit()
-# $data.InstallNvidia('cuda')
-# $data.InstallNvidia('cudnn')
-# $data.SetupPath($true)
-[PythonDev]::new().SetupPath($true) 
  
-#Write-Host " [PythonDev]::new().SetupPath(''$''true) "
+$Data = [Main]::new()
+$Data.InstallFlow()
+# $Data.InstallFlow("3.12.10")
+# $Data.SetupPath($true)
+
+
+# Manual installation (advanced / step-by-step)
+# ใช้กรณีต้องการควบคุมทุกขั้นตอนเอง แทนการใช้ InstallFlow()
+
+############################################
+# 1) สร้างโฟลเดอร์พื้นฐานทั้งหมดตาม Config
+#    - RootDir
+#    - DLDir (โฟลเดอร์ดาวน์โหลดชั่วคราว)
+#    - PyDir (โฟลเดอร์ Python embeddable)
+#    - driver\* (เช่น ffmpeg, PortableGit, CUDA, cuDNN)
+# $Data.CreateFolders()
+
+# 2) แสดงเมนูให้เลือกเวอร์ชัน Python จากรายการที่ดึงมาจาก NuGet
+#    คืนค่าเป็นสตริงเวอร์ชัน เช่น "3.12.10"
+# $version = $Data.ShowPythonVersionsMenu()
+
+# 3) ดาวน์โหลด + แตกไฟล์ Python embeddable ตามเวอร์ชันที่เลือกไปยัง PyDir
+# $Data.DownloadAndCopyPython($version)
+
+# 4) ติดตั้ง pip ลงใน Python embeddable
+# $Data.GetPip()
+
+# 5) ดาวน์โหลดและติดตั้ง FFmpeg (portable) ไปยังโฟลเดอร์ driver\ffmpeg
+# $Data.InstallFFmpeg($false)
+
+# 6) ดาวน์โหลดและติดตั้ง PortableGit ไปยังโฟลเดอร์ driver\PortableGit
+# $Data.InstallPGit($false)
+
+# 7) ดาวน์โหลดตัวติดตั้ง NVIDIA CUDA runtime
+# $Data.GetNvTool("cuda")
+
+# 8) ดาวน์โหลดไฟล์ที่ต้องใช้สำหรับติดตั้ง cuDNN
+# $Data.GetNvTool("cudnn")
+
+# 9) ติดตั้ง CUDA จากไฟล์ที่ดาวน์โหลดไว้
+# $Data.InstallNvidia("cuda")
+
+# 10) ติดตั้ง cuDNN จากไฟล์ที่ดาวน์โหลดไว้
+# $Data.InstallNvidia("cudnn")
+
+# 11) ลบโฟลเดอร์ DLDir (ไฟล์ดาวน์โหลดชั่วคราว) ทิ้งเพื่อล้าง cache
+# $Data.RemoveFolder("DLDir")
+
+# 12) ตั้งค่า PATH ใน session ปัจจุบัน (และบันทึกลง User ถ้าระบบรองรับ)
+#     - ทำให้ python / pip / git / ffmpeg / CUDA / cuDNN ใช้งานได้ใน PowerShell นี้
+# $Data.SetupPath($true)
+############################################
+
+
+
+ 

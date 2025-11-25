@@ -10,7 +10,7 @@ if errorlevel 1 (
 )
 
 REM run PythonNuget.ps1 elevated from the same folder as this batch
-set "scriptPath=%~dp0\PythonDev.ps1"
+set "scriptPath=%~dp0PythonDev.ps1"
 
 powershell -Command ^
     "Start-Process pwsh -ArgumentList '-NoProfile','-ExecutionPolicy Bypass','-NoExit','-Command & ''%scriptPath%'' ' -Verb RunAs"
