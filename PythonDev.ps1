@@ -1140,7 +1140,7 @@ class Main {
                 }
                 'cudnn' {
                     $archiveUrl = "https://developer.nvidia.com/cudnn-archive"
-                    $downloadPattern = "https://developer.download.nvidia.com/compute/cudnn/{0}/local_installers/cudnn_{0}_windows.exe"
+                    $downloadPattern = "https://developer.download.nvidia.com/compute/cudnn/{0}/local_installers/cudnn_{0}_windows_x86_64.exe"
                     # หมายเหตุ: cuDNN เปลี่ยน format บ่อย อันนี้ต้อง sync ตามหน้าเว็บจริง
                 }
                 default {
